@@ -67,6 +67,10 @@ checkout back to vanilla.
 **Next up:** HUD and menus on a pointable panel in the headset, then controller locomotion, snap turn and a tracked
 weapon hand (with a left-handed option).
 
+**Probe build (HUD and weapon):** `python3 tools/install_into_port.py <NewDarkRecompiled checkout> --probe`, rebuild with `--fastpaths`, then run
+without the VR flags: `$env:NDVR_PROBE=1; $env:SS2PORT_NOVSYNC=1; .\ss2port.exe --windowed SS2.exe`. Walk around in a level, fire the
+weapon a few times, quit, and send the log (lines starting `NDVR PROBE`). It changes nothing in the game.
+
 ## Build from source
 
 You only need Python 3. Everything else, including the OpenXR loader, is built for you.

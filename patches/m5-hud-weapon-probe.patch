@@ -1,0 +1,70 @@
+diff --git a/port/core/fastpaths.c b/port/core/fastpaths.c
+index f90af07..76e5d18 100644
+--- a/port/core/fastpaths.c
++++ b/port/core/fastpaths.c
+@@ -145,4 +145,14 @@ int fp_006ebc90(CPU *c) {
+ 
+ /* ---- NewDarkVR: render_scene_from_camera (0x00601430) -> port/core/vr_stereo.c ---- */
+ extern int vr_scene_hook(CPU *c);
+-int fp_00601430(CPU *c) { return vr_scene_hook(c); }
++extern void vr_probe_event(CPU *c, const char *name, int overlay);   /* NewDarkVR probe (port/core/vr_probe.c) */
++extern int vr_probe_fire(CPU *c);
++int fp_00601430(CPU *c) { vr_probe_event(c, "render_scene_from_camera", -1); return vr_scene_hook(c); }
++
++/* ---- NewDarkVR probe: log-only entry hooks; each returns 0 so the original runs (fire: 0x0043b220 cmd_fire_weapon) ---- */
++int fp_006017d0(CPU *c) { vr_probe_event(c, "render_frame_world", -1); return 0; }
++int fp_006c9e30(CPU *c) { vr_probe_event(c, "d3d_display_set_overlay", 1); return 0; }
++int fp_006c9ee0(CPU *c) { vr_probe_event(c, "d3d_display_end_overlay", 0); return 0; }
++int fp_006c8700(CPU *c) { vr_probe_event(c, "d3d_display_end_frame", -1); return 0; }
++int fp_006c8600(CPU *c) { vr_probe_event(c, "d3d_display_flip", -1); return 0; }
++int fp_0043b220(CPU *c) { return vr_probe_fire(c); }
+diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
+index 5ec91a6..ffc9b60 100644
+--- a/port/dx/d3d9.c
++++ b/port/dx/d3d9.c
+@@ -431,6 +431,7 @@ static void vr_capture(uint32_t base, uint32_t stride, uint32_t span, int pos) {
+         vr_cap_buf[vr_cap_n++] = v[0]; vr_cap_buf[vr_cap_n++] = v[1]; vr_cap_buf[vr_cap_n++] = v[3];
+     }
+ }
++#include "vr_probe.h"      /* NewDarkVR probe (port/core/vr_probe.c) */
+ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint32_t stride, uint32_t idx, int idx32, int32_t base_vertex, uint32_t min_index, uint32_t num_vertices) {
+     uint32_t nseq; int plat_prim;
+     if (!prims || !prim_counts(type, prims, &nseq, &plat_prim)) return;
+@@ -448,6 +449,15 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+     if (idx && num_vertices && hi - lo + 1 > num_vertices + min_index) { /* trust the indices */ }
+     uint32_t span = hi - lo + 1;
+     if (vr_cap_on && L.rhw) vr_capture(vbase + lo * stride, stride, span, L.pos);
++    if (vr_probe_on) {
++        VrProbeDraw pd; memset(&pd, 0, sizeof pd); State *ps_ = &d->st; Res *t0 = R(ps_->tex[0]);
++        pd.fvf = ps_->fvf; pd.rhw = L.rhw; pd.ztest = ps_->rs[7] != 0; pd.zwrite = ps_->rs[14] != 0; pd.zfunc = (int)ps_->rs[23];
++        pd.blend = ps_->rs[27] != 0; pd.src_blend = (int)ps_->rs[19]; pd.dst_blend = (int)ps_->rs[20]; pd.atest = ps_->rs[15] != 0; pd.ntex = L.ntex;
++        pd.prims = prims; pd.span = span; pd.stride = stride; pd.pos = L.pos; pd.vaddr = vbase + lo * stride; pd.prim_type = type;
++        if (t0) { pd.tex = ps_->tex[0]->guest; pd.tex_w = t0->w; pd.tex_h = t0->h; }
++        memcpy(pd.scissor, ps_->scissor, sizeof pd.scissor); memcpy(pd.viewport, ps_->vp, sizeof pd.viewport);
++        vr_probe_draw(&pd);
++    }
+     size_t maxidx = (size_t)nseq * 3 + 6;
+     if (d->icap < (int)maxidx) { d->icap = (int)maxidx; d->ibuf = realloc(d->ibuf, (size_t)d->icap * sizeof *d->ibuf); }
+     VState vs; vstate_of(&d->st, &vs);
+@@ -811,6 +821,7 @@ static void dev_reset(CPU *c, ComObj *s) {
+ }
+ static void dev_present(CPU *c, ComObj *s) {
+     Device *d = DEV(s); (void)c;
++    if (vr_probe_on) vr_probe_present();
+     plat_gfx_present(); port_frame_presented(); plat_gfx_begin_frame(); plat_gfx_set_target(surface_target(R(d->rt))); apply_viewport(d);
+     c->eax = 0;
+ }
+@@ -915,10 +926,11 @@ static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->r
+ static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
+ static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
+ static Device *g_vr_dev;   /* NewDarkVR: the device, for vr_d3d_* below */
+-static void dev_beginscene(CPU *c, ComObj *s) { Device *d = DEV(s); g_vr_dev = d; if (d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 1; RET(0); }
+-static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; RET(0); }
++static void dev_beginscene(CPU *c, ComObj *s) { Device *d = DEV(s); g_vr_dev = d; if (d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 1; if (vr_probe_on) vr_probe_scene(1); RET(0); }
++static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; if (vr_probe_on) vr_probe_scene(0); RET(0); }
+ static void dev_clear(CPU *c, ComObj *s) {
+     Device *d = DEV(s); uint32_t n = A(1), rects = A(2), flags = A(3); float z = u2f(A(5));
++    if (vr_probe_on) vr_probe_clear(n, flags, A(4), A(5));
+     int color = (flags & 1) != 0, depth = (flags & 2) && d->ds, sten = (flags & 4) && d->ds;
+     if (!n || !rects) { plat_gfx_clear(color, A(4), depth, z, sten, A(6)); RET(0); return; }
+     for (uint32_t i = 0; i < n; i++) { uint32_t r = rects + 16 * i; plat_gfx_scissor(1, (int32_t)RD32(r), (int32_t)RD32(r + 4), (int32_t)(RD32(r + 8) - RD32(r)), (int32_t)(RD32(r + 12) - RD32(r + 4))); plat_gfx_clear(color, A(4), depth, z, sten, A(6)); }
