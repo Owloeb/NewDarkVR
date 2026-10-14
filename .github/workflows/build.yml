@@ -27,6 +27,27 @@ jobs:
           name: NewDarkVR-test-win64
           path: build/NewDarkVR-test-win64.zip
 
+  latest:
+    # Every push to main refreshes a rolling "Latest build" pre-release, so testing never needs a tag.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: NewDarkVR-test-win64
+      - name: Refresh the rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest NewDarkVR-test-win64.zip --prerelease --target "$GITHUB_SHA" \
+            --title "Latest build" \
+            --notes "Automatic build of ${GITHUB_SHA::7} from main. Experimental: not yet tested on every headset setup."
+
   release:
     # Tag a commit "v0.1.0" (or similar) and this attaches the zip to a GitHub Release.
     if: startsWith(github.ref, 'refs/tags/v')

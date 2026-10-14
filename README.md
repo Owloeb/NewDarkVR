@@ -12,7 +12,9 @@ No game content or game-derived code is in this repo.
 
 1. Connect your headset and make sure the active OpenXR runtime is one that offers OpenGL
    (see [Runtimes](#runtimes) below: Quest Link, SteamVR, or Virtual Desktop).
-2. Download **`NewDarkVR-test-win64.zip`** from the [Releases](../../releases) page and unzip it anywhere.
+2. Download **`NewDarkVR-test-win64.zip`** from the [Latest build](../../releases/tag/latest) release (rebuilt
+   automatically on every push to `main`) and unzip it anywhere. Tagged versions are on the
+   [Releases](../../releases) page.
 3. Run `ndvr_gltest.exe` and put the headset on.
 
 You should see a spinning cube 1.5 m ahead with real depth, a floor grid, and a cube in each hand (blue left,

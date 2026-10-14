@@ -114,6 +114,31 @@ static void fail(const char *fmt, ...)
 void ndvr_set_log(void (*fn)(const char *)) { g_log = fn; }
 const char *ndvr_last_error(void) { return g_err; }
 
+static const char *resultName(XrResult r)
+{
+    switch ((int)r) {
+    case XR_ERROR_VALIDATION_FAILURE: return "VALIDATION_FAILURE";
+    case XR_ERROR_RUNTIME_FAILURE: return "RUNTIME_FAILURE";
+    case XR_ERROR_OUT_OF_MEMORY: return "OUT_OF_MEMORY";
+    case XR_ERROR_API_VERSION_UNSUPPORTED: return "API_VERSION_UNSUPPORTED";
+    case XR_ERROR_INITIALIZATION_FAILED: return "INITIALIZATION_FAILED";
+    case XR_ERROR_FUNCTION_UNSUPPORTED: return "FUNCTION_UNSUPPORTED";
+    case XR_ERROR_FEATURE_UNSUPPORTED: return "FEATURE_UNSUPPORTED";
+    case XR_ERROR_EXTENSION_NOT_PRESENT: return "EXTENSION_NOT_PRESENT";
+    case XR_ERROR_LIMIT_REACHED: return "LIMIT_REACHED";
+    case XR_ERROR_INSTANCE_LOST: return "INSTANCE_LOST";
+    case XR_ERROR_SESSION_LOST: return "SESSION_LOST";
+    case XR_ERROR_SYSTEM_INVALID: return "SYSTEM_INVALID";
+    case XR_ERROR_FORM_FACTOR_UNSUPPORTED: return "FORM_FACTOR_UNSUPPORTED";
+    case XR_ERROR_FORM_FACTOR_UNAVAILABLE: return "FORM_FACTOR_UNAVAILABLE";
+    case XR_ERROR_API_LAYER_NOT_PRESENT: return "API_LAYER_NOT_PRESENT";
+    case XR_ERROR_GRAPHICS_DEVICE_INVALID: return "GRAPHICS_DEVICE_INVALID";
+    case XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING: return "GRAPHICS_REQUIREMENTS_CALL_MISSING";
+    case XR_ERROR_RUNTIME_UNAVAILABLE: return "RUNTIME_UNAVAILABLE";
+    default: return "see openxr.h";
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /* OpenXR function table                                                      */
 /* ------------------------------------------------------------------------- */
@@ -144,7 +169,7 @@ static PFN_xrGetInstanceProcAddr g_getProcAddr;
     do {                                                              \
         XrResult r_ = (call);                                         \
         if (XR_FAILED(r_)) {                                          \
-            fail("%s failed (XrResult %d)", #call, (int)r_);          \
+            fail("%s failed: %s (%d)", #call, resultName(r_), (int)r_); \
             return 0;                                                 \
         }                                                             \
     } while (0)
@@ -585,13 +610,33 @@ int ndvr_init(void *hdc, void *hglrc)
     strcpy(ici.applicationInfo.applicationName, "NewDarkVR");
     ici.applicationInfo.applicationVersion = 1;
     strcpy(ici.applicationInfo.engineName, "NewDarkRecompiled");
-    ici.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
     ici.enabledExtensionCount = 1;
     ici.enabledExtensionNames = exts;
-    r = createInstance(&ici, &g_inst);
+    {
+        /* Ask for OpenXR 1.0, not the newest version the headers know. A runtime refuses a version
+         * newer than it implements (XR_ERROR_API_VERSION_UNSUPPORTED), while 1.0 is honored by 1.0
+         * and 1.1 runtimes alike, and everything this module uses is core 1.0 plus the GL extension. */
+        static const XrVersion tries[2] = {XR_API_VERSION_1_0, XR_MAKE_VERSION(1, 0, 0)};
+        int t;
+        r = XR_ERROR_API_VERSION_UNSUPPORTED;
+        for (t = 0; t < 2 && r == XR_ERROR_API_VERSION_UNSUPPORTED; ++t) {
+            ici.applicationInfo.apiVersion = tries[t];
+            r = createInstance(&ici, &g_inst);
+        }
+    }
     if (XR_FAILED(r)) {
-        fail("xrCreateInstance failed (%d): is a headset runtime active? "
-             "(Meta Quest Link must be running and set as the OpenXR runtime)", (int)r);
+        const char *hint;
+        if (r == XR_ERROR_API_VERSION_UNSUPPORTED)
+            hint = "the runtime rejected the OpenXR version requested";
+        else if (r == XR_ERROR_RUNTIME_UNAVAILABLE || r == XR_ERROR_INITIALIZATION_FAILED ||
+                 r == XR_ERROR_RUNTIME_FAILURE)
+            hint = "the runtime is not running: start Quest Link / SteamVR / Virtual Desktop Streamer and "
+                   "connect the headset";
+        else if (r == XR_ERROR_EXTENSION_NOT_PRESENT)
+            hint = "the runtime lacks XR_KHR_opengl_enable: switch runtime (see README)";
+        else
+            hint = "see the OpenXR loader messages above";
+        fail("xrCreateInstance failed: %s (%d): %s", resultName(r), (int)r, hint);
         return 0;
     }
 
