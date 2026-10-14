@@ -105,6 +105,14 @@ int         ndvr_begin_frame(ndvr_frame *out);
 /* Releases the eye images and submits the frame. Safe to call after begin returned 0. */
 void        ndvr_end_frame(void);
 
+/* Optional, call before ndvr_end_frame(): submit the frame with these eye poses and fovs instead of the ones from
+ * ndvr_begin_frame(). Use it when the images were rendered for other poses/fovs than the runtime reported (the
+ * compositor then reprojects correctly). Applies to one frame. */
+void        ndvr_set_submit_views(const ndvr_pose pose[2], const ndvr_fov fov[2]);
+/* Copy (and scale) a framebuffer you rendered elsewhere into the eye image acquired by ndvr_begin_frame().
+ * src_fbo is a framebuffer id in the same GL context; flip_y flips vertically (for images stored top row first). */
+void        ndvr_blit_eye(int eye, uint32_t src_fbo, int src_w, int src_h, int flip_y);
+
 /* Bind an eye's framebuffer and set the viewport to cover it. ndvr_unbind() restores the
  * framebuffer binding that was current when ndvr_bind_eye() was first called this frame. */
 void        ndvr_bind_eye(const ndvr_eye *eye);

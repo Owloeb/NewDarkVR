@@ -34,6 +34,11 @@
 #define GL_FRAMEBUFFER_COMPLETE   0x8CD5
 #define GL_SRGB8_ALPHA8           0x8C43
 #define GL_RGBA8                  0x8058
+#define GL_READ_FRAMEBUFFER       0x8CA8
+#define GL_DRAW_FRAMEBUFFER       0x8CA9
+#define GL_READ_FRAMEBUFFER_BINDING 0x8CAA
+#define GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6
+#define GL_LINEAR_FILTER          0x2601
 
 typedef void (APIENTRY *PFNGLGENFRAMEBUFFERS)(GLsizei, GLuint *);
 typedef void (APIENTRY *PFNGLDELETEFRAMEBUFFERS)(GLsizei, const GLuint *);
@@ -45,6 +50,7 @@ typedef void (APIENTRY *PFNGLGENRENDERBUFFERS)(GLsizei, GLuint *);
 typedef void (APIENTRY *PFNGLDELETERENDERBUFFERS)(GLsizei, const GLuint *);
 typedef void (APIENTRY *PFNGLBINDRENDERBUFFER)(GLenum, GLuint);
 typedef void (APIENTRY *PFNGLRENDERBUFFERSTORAGE)(GLenum, GLenum, GLsizei, GLsizei);
+typedef void (APIENTRY *PFNGLBLITFRAMEBUFFER)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 
 static struct {
     PFNGLGENFRAMEBUFFERS genFramebuffers;
@@ -57,6 +63,7 @@ static struct {
     PFNGLDELETERENDERBUFFERS deleteRenderbuffers;
     PFNGLBINDRENDERBUFFER bindRenderbuffer;
     PFNGLRENDERBUFFERSTORAGE renderbufferStorage;
+    PFNGLBLITFRAMEBUFFER blitFramebuffer;
 } gl;
 
 static int loadGL(void)
@@ -75,6 +82,7 @@ static int loadGL(void)
     LOAD(deleteRenderbuffers, "glDeleteRenderbuffers")
     LOAD(bindRenderbuffer, "glBindRenderbuffer")
     LOAD(renderbufferStorage, "glRenderbufferStorage")
+    LOAD(blitFramebuffer, "glBlitFramebuffer")
 #undef LOAD
     return 1;
 }
@@ -950,6 +958,34 @@ int ndvr_begin_frame(ndvr_frame *out)
     return 1;
 }
 
+static ndvr_pose g_subPose[2];
+static ndvr_fov g_subFov[2];
+static int g_haveSub;
+
+void ndvr_set_submit_views(const ndvr_pose pose[2], const ndvr_fov fov[2])
+{
+    g_subPose[0] = pose[0]; g_subPose[1] = pose[1];
+    g_subFov[0] = fov[0];   g_subFov[1] = fov[1];
+    g_haveSub = 1;
+}
+
+void ndvr_blit_eye(int eye, uint32_t src_fbo, int src_w, int src_h, int flip_y)
+{
+    GLint prevRead = 0, prevDraw = 0;
+    if (eye < 0 || eye > 1 || !g_framRendered)
+        return;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+    gl.bindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
+    gl.bindFramebuffer(GL_DRAW_FRAMEBUFFER, g_eye[eye].fbo[g_eye[eye].acquired]);
+    glDisable(0x0C11); /* GL_SCISSOR_TEST */
+    gl.blitFramebuffer(0, 0, src_w, src_h,
+                       0, flip_y ? (GLint)g_eye[eye].h : 0, (GLint)g_eye[eye].w, flip_y ? 0 : (GLint)g_eye[eye].h,
+                       GL_COLOR_BUFFER_BIT, GL_LINEAR_FILTER);
+    gl.bindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
+    gl.bindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevDraw);
+}
+
 void ndvr_end_frame(void)
 {
     XrFrameEndInfo ei;
@@ -977,6 +1013,19 @@ void ndvr_end_frame(void)
             pv[e].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
             pv[e].pose = g_views[e].pose;
             pv[e].fov = g_views[e].fov;
+            if (g_haveSub) {
+                pv[e].pose.orientation.x = g_subPose[e].orientation.x;
+                pv[e].pose.orientation.y = g_subPose[e].orientation.y;
+                pv[e].pose.orientation.z = g_subPose[e].orientation.z;
+                pv[e].pose.orientation.w = g_subPose[e].orientation.w;
+                pv[e].pose.position.x = g_subPose[e].position.x;
+                pv[e].pose.position.y = g_subPose[e].position.y;
+                pv[e].pose.position.z = g_subPose[e].position.z;
+                pv[e].fov.angleLeft = g_subFov[e].left;
+                pv[e].fov.angleRight = g_subFov[e].right;
+                pv[e].fov.angleUp = g_subFov[e].up;
+                pv[e].fov.angleDown = g_subFov[e].down;
+            }
             pv[e].subImage.swapchain = g_eye[e].sc;
             pv[e].subImage.imageRect.offset.x = 0;
             pv[e].subImage.imageRect.offset.y = 0;
@@ -995,6 +1044,7 @@ void ndvr_end_frame(void)
     }
     fn.xrEndFrame(g_sess, &ei);
     g_frameBegun = g_framRendered = g_boundThisFrame = 0;
+    g_haveSub = 0;
 }
 
 void ndvr_bind_eye(const ndvr_eye *eye)

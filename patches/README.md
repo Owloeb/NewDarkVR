@@ -30,3 +30,10 @@ separation) into two render textures, and shows them side by side in the window.
 - adds `port/core/vr_stereo.c` (new), a forwarder in `port/core/fastpaths.c`, and two small functions at the end of `port/dx/d3d9.c`
 - build with `--fastpaths`; off unless `NDVR_STEREO=1` is set in the environment; `NDVR_IPD` sets the separation in engine units (default 0.207)
 - logs `NDVR:` lines with `--verbose`, including the CPU time of the two renders
+
+## vr-port-hooks.patch (headset build, supersedes m3a and m3b)
+
+Applied together with the NewDarkVR files by `tools/install_into_port.py <NewDarkRecompiled checkout>`; do not apply it by hand.
+Adds the forwarder in `port/core/fastpaths.c`, `vr_d3d_*` in `port/dx/d3d9.c`, `vr_gl_tex_fbo` in
+`port/backends/sdl2/gl_render.c` and the Windows link libraries in `port/CMakeLists.txt`. The sources it needs
+(`port-glue/vr_stereo.c`, `src/ndvr_xr.c`, `include/ndvr.h`, the OpenXR headers) are copied into `port/core/`.

@@ -1,0 +1,68 @@
+diff --git a/port/CMakeLists.txt b/port/CMakeLists.txt
+index 00dd761..572f722 100644
+--- a/port/CMakeLists.txt
++++ b/port/CMakeLists.txt
+@@ -85,6 +85,9 @@ add_executable(ss2port ${SYS_SRC} ${BACKEND_SRC} $<TARGET_OBJECTS:game>)
+ target_include_directories(ss2port PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+ target_compile_definitions(ss2port PRIVATE ${GEN_DEFS})
+ target_link_libraries(ss2port PRIVATE portcore)
++if(WIN32)       # NewDarkVR: the OpenXR module (port/core/ndvr_xr.c) uses OpenGL 1.1 and the registry
++  target_link_libraries(ss2port PRIVATE opengl32 advapi32)
++endif()
+ if(NOT WIN32)
+   target_link_libraries(ss2port PRIVATE m)
+ endif()
+diff --git a/port/backends/sdl2/gl_render.c b/port/backends/sdl2/gl_render.c
+index fc6c047..9e9af35 100644
+--- a/port/backends/sdl2/gl_render.c
++++ b/port/backends/sdl2/gl_render.c
+@@ -419,3 +419,6 @@ void gl_resize_backbuffer(int w, int h) {
+     bind_target(&bb); target = &bb; cur_vp = (PlatViewport){ 0, 0, w, h, 0, 1 }; glViewport(0, 0, w, h); sc_on = 0; apply_scissor();
+     glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+ }
++
++/* NewDarkVR: the framebuffer behind a render-target texture (render thread only). */
++unsigned vr_gl_tex_fbo(PlatTexture *t, int *w, int *h) { ensure_fbo(t); *w = t->w; *h = t->h; return t->fbo; }
+diff --git a/port/core/fastpaths.c b/port/core/fastpaths.c
+index ba13283..f90af07 100644
+--- a/port/core/fastpaths.c
++++ b/port/core/fastpaths.c
+@@ -142,3 +142,7 @@ int fp_006ebc90(CPU *c) {
+     c->eax = dst; c->edx = bm; c->ecx = (uint32_t)w;
+     return 1;
+ }
++
++/* ---- NewDarkVR: render_scene_from_camera (0x00601430) -> port/core/vr_stereo.c ---- */
++extern int vr_scene_hook(CPU *c);
++int fp_00601430(CPU *c) { return vr_scene_hook(c); }
+diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
+index 413e0da..2639a27 100644
+--- a/port/dx/d3d9.c
++++ b/port/dx/d3d9.c
+@@ -892,7 +892,8 @@ static void dev_setrt(CPU *c, ComObj *s) {
+ static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->rt) { OUTP(2, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->rt); OUTP(2, d->rt->guest); RET(0); }
+ static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
+ static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
+-static void dev_beginscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 1; RET(0); }
++static Device *g_vr_dev;   /* NewDarkVR: the device, for vr_d3d_* below */
++static void dev_beginscene(CPU *c, ComObj *s) { Device *d = DEV(s); g_vr_dev = d; if (d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 1; RET(0); }
+ static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; RET(0); }
+ static void dev_clear(CPU *c, ComObj *s) {
+     Device *d = DEV(s); uint32_t n = A(1), rects = A(2), flags = A(3); float z = u2f(A(5));
+@@ -1068,3 +1069,16 @@ const ShimDef d3d9_shims[] = {
+     { "D3DXLoadSurfaceFromSurface", sh_D3DXLoadSurfaceFromSurface, STD(8) },
+     { 0, 0, 0 }
+ };
++
++/* ---- NewDarkVR (port/core/vr_stereo.c): redirect the engine's draws into an eye texture and back. ---- */
++void vr_d3d_eye_begin(PlatTexture *t, int w, int h) {
++    plat_gfx_set_target(t);
++    plat_gfx_scissor(0, 0, 0, w, h);
++    PlatViewport v = { 0, 0, w, h, 0.0f, 1.0f }; plat_gfx_viewport(&v);
++    plat_gfx_clear(1, 0xFF000000u, 1, 1.0f, 0, 0);
++    if (g_vr_dev) apply_viewport(g_vr_dev);                         /* the engine's own viewport and scissor again */
++}
++void vr_d3d_restore(void) {
++    if (!g_vr_dev) return;
++    plat_gfx_set_target(surface_target(R(g_vr_dev->rt))); apply_viewport(g_vr_dev);
++}

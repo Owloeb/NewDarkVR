@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""install_into_port.py PORT_CHECKOUT [--uninstall]
+
+Puts the NewDarkVR code into a NewDarkRecompiled checkout (the vanilla repo is never touched from here; this changes
+your local copy only):
+
+  - copies port-glue/vr_stereo.c, src/ndvr_xr.c (guarded for Windows), include/ndvr.h and the OpenXR headers into port/core/
+  - applies patches/vr-port-hooks.patch: a forwarder in port/core/fastpaths.c, two small functions in port/dx/d3d9.c,
+    one in port/backends/sdl2/gl_render.c and the Windows link libraries in port/CMakeLists.txt
+
+Then build the port as usual, with --fastpaths:   python3 port/build.py <SS2.exe> --target windows --install --fastpaths
+and put openxr_loader.dll (from the NewDarkVR release zip) next to ss2port.exe.
+
+--uninstall restores the four patched files with git and removes the copied ones."""
+import os, shutil, subprocess, sys
+
+here = os.path.dirname(os.path.abspath(__file__)); repo = os.path.dirname(here)
+args = [a for a in sys.argv[1:] if not a.startswith('--')]
+undo = '--uninstall' in sys.argv
+if len(args) != 1: sys.exit(__doc__)
+port = os.path.abspath(args[0])
+core = os.path.join(port, 'port', 'core')
+if not os.path.isfile(os.path.join(core, 'fastpaths.c')): sys.exit(f'{port} does not look like a NewDarkRecompiled checkout (no port/core/fastpaths.c)')
+
+tracked = ['port/core/fastpaths.c', 'port/dx/d3d9.c', 'port/backends/sdl2/gl_render.c', 'port/CMakeLists.txt']
+copied = ['port/core/vr_stereo.c', 'port/core/ndvr_xr.c', 'port/core/ndvr.h', 'port/core/openxr']
+
+def git(*a, check=True): return subprocess.run(['git', '-C', port, *a], check=check, capture_output=True, text=True)
+
+def remove_copied():
+    for c in copied:
+        p = os.path.join(port, c)
+        if os.path.isdir(p): shutil.rmtree(p)
+        elif os.path.exists(p): os.remove(p)
+
+if undo:
+    git('checkout', '--', *tracked); remove_copied(); print('removed the NewDarkVR changes'); sys.exit(0)
+
+patch = os.path.join(repo, 'patches', 'vr-port-hooks.patch')
+chk = git('apply', '--check', patch, check=False)
+if chk.returncode:
+    sys.exit('The patch does not apply to this checkout:\n' + chk.stderr +
+             '\nIf an earlier NewDarkVR patch is applied, undo it first:  python3 tools/install_into_port.py ' + port + ' --uninstall\n'
+             '(or: git checkout port/core/fastpaths.c port/dx/d3d9.c port/backends/sdl2/gl_render.c port/CMakeLists.txt, and delete port/core/vr_stereo.c)')
+shutil.copy(os.path.join(repo, 'port-glue', 'vr_stereo.c'), os.path.join(core, 'vr_stereo.c'))
+shutil.copy(os.path.join(repo, 'include', 'ndvr.h'), os.path.join(core, 'ndvr.h'))
+with open(os.path.join(repo, 'src', 'ndvr_xr.c'), encoding='utf-8') as f: src = f.read()
+with open(os.path.join(core, 'ndvr_xr.c'), 'w', encoding='utf-8', newline='\n') as f: f.write('#ifdef _WIN32\n' + src + '\n#endif /* _WIN32 */\n')
+dst = os.path.join(core, 'openxr')
+if os.path.isdir(dst): shutil.rmtree(dst)
+shutil.copytree(os.path.join(repo, 'third_party', 'openxr', 'include', 'openxr'), dst)
+git('apply', patch)
+print('NewDarkVR installed into', port)
+print('Next: python3 port/build.py "<path to SS2.exe>" --target windows --install --fastpaths')
+print('Then copy openxr_loader.dll next to ss2port.exe and run with:  $env:NDVR_VR=1; $env:SS2PORT_NOVSYNC=1; .\\ss2port.exe --windowed --verbose SS2.exe')
