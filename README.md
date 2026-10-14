@@ -65,8 +65,8 @@ No binaries are downloaded.
 | M1 | Standalone stereo scene in the headset (cube, grid, hands) | **done, verified** (`ndvr_gltest.exe`, 100 fps) |
 | M2 | Find the camera and the per-frame view/projection in the port | **done** ([findings](docs/M2-FINDINGS.md)): the world is pre-transformed, so M3 re-runs the engine's scene render per eye |
 | M3 | Stereo: render the scene once per eye (hook `render_scene_from_camera`) into the eye framebuffers | **done**, side-by-side preview verified on the desktop (about 5 ms CPU for both eyes) |
-| M3c | Headset output: eye textures to OpenXR, head-tracked camera | **working on Quest 3** (stereo verified; yaw/pitch signs fixed); view is still letterboxed to the engine's 16:9 field of view |
-| M4 | Head decoupled from body, snap turn, physical crouch | not started |
+| M3c | Headset output: eye textures to OpenXR, head-tracked camera | **working on Quest 3**: full field of view (automatic engine zoom), axes measured with `NDVR_CALIB`, stable world |
+| M4 | Head decoupled from body, snap turn, physical crouch | partly: head turns and room-scale movement are relative to the body; snap turn and crouch to do |
 | M5 | Tracked hands and weapons, aim and frob from the controller, handedness option | not started |
 | M6 | HUD and inventory on a pointable panel | not started |
 
