@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Zig
+        run: python -m pip install ziglang
+      - name: Build loader, test app and release zip
+        run: python build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NewDarkVR-test-win64
+          path: build/NewDarkVR-test-win64.zip
+
+  release:
+    # Tag a commit "v0.1.0" (or similar) and this attaches the zip to a GitHub Release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: NewDarkVR-test-win64
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" NewDarkVR-test-win64.zip --generate-notes
