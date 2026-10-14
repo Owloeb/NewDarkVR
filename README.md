@@ -42,6 +42,31 @@ is missing it says so and what to change. If your setup behaves differently, ope
 If a runtime turns out to be D3D11-only, the planned fix is to render in OpenGL and hand the frames to a D3D11
 swapchain through `WGL_NV_DX_interop2`, so the mod works on any runtime.
 
+## Playing it (current state)
+
+The game build needs your own NewDarkRecompiled checkout (your local copy is patched, the NewDarkRecompiled repository is not):
+
+```bash
+git clone https://github.com/Owloeb/NewDarkVR
+python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled
+cd ~/NewDarkRecompiled && python3 port/build.py "<path to SS2.exe>" --target windows --install --fastpaths
+```
+
+Put `openxr_loader.dll` (from the release zip) next to `ss2port.exe`, then in PowerShell:
+
+```powershell
+$env:NDVR_VR = 1; $env:SS2PORT_NOVSYNC = 1
+.\ss2port.exe --windowed --verbose SS2.exe
+```
+
+Menus and the HUD are still on the desktop window; start or load a game there, then put the headset on. Mouse turns
+the body, the head looks around freely, left controller menu button recentres. Tuning variables are listed at the top
+of `port-glue/vr_stereo.c`. `python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled --uninstall` puts your
+checkout back to vanilla.
+
+**Next up:** HUD and menus on a pointable panel in the headset, then controller locomotion, snap turn and a tracked
+weapon hand (with a left-handed option).
+
 ## Build from source
 
 You only need Python 3. Everything else, including the OpenXR loader, is built for you.
@@ -65,7 +90,7 @@ No binaries are downloaded.
 | M1 | Standalone stereo scene in the headset (cube, grid, hands) | **done, verified** (`ndvr_gltest.exe`, 100 fps) |
 | M2 | Find the camera and the per-frame view/projection in the port | **done** ([findings](docs/M2-FINDINGS.md)): the world is pre-transformed, so M3 re-runs the engine's scene render per eye |
 | M3 | Stereo: render the scene once per eye (hook `render_scene_from_camera`) into the eye framebuffers | **done**, side-by-side preview verified on the desktop (about 5 ms CPU for both eyes) |
-| M3c | Headset output: eye textures to OpenXR, head-tracked camera | **working on Quest 3**: full field of view (automatic engine zoom), axes measured with `NDVR_CALIB`, stable world |
+| M3c | Headset output: eye textures to OpenXR, head-tracked camera | **working on Quest 3**: full field of view, headset-resolution eye textures, axes measured with `NDVR_CALIB`, auto recentre |
 | M4 | Head decoupled from body, snap turn, physical crouch | partly: head turns and room-scale movement are relative to the body; snap turn and crouch to do |
 | M5 | Tracked hands and weapons, aim and frob from the controller, handedness option | not started |
 | M6 | HUD and inventory on a pointable panel | not started |
