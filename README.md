@@ -63,8 +63,8 @@ No binaries are downloaded.
 |---|---|---|
 | M0 | OpenXR session on a GL context, tracking and input | **done, verified on Quest 3 via Virtual Desktop** |
 | M1 | Standalone stereo scene in the headset (cube, grid, hands) | **done, verified** (`ndvr_gltest.exe`, 100 fps) |
-| M2 | Find the camera and the per-frame view/projection in the port | code read done ([findings](docs/M2-FINDINGS.md)); needs one logged run of `patches/m2-d3d9-stats.patch` |
-| M3 | Stereo: draw the world once per eye into the eye framebuffers | not started |
+| M2 | Find the camera and the per-frame view/projection in the port | **done** ([findings](docs/M2-FINDINGS.md)): the world is pre-transformed, so M3 re-runs the engine's scene render per eye |
+| M3 | Stereo: render the scene once per eye (hook `render_scene_from_camera`) into the eye framebuffers | not started |
 | M4 | Head decoupled from body, snap turn, physical crouch | not started |
 | M5 | Tracked hands and weapons, aim and frob from the controller, handedness option | not started |
 | M6 | HUD and inventory on a pointable panel | not started |

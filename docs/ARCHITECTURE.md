@@ -29,6 +29,10 @@ renderbuffer. The renderer draws into those framebuffers instead of (or as well 
 
 ## 3. Stereo strategy (M3)
 
+> **Update after M2:** the measured answer is that the engine submits pre-transformed vertices, so the record/replay
+> plan below does not work. M3 hooks `render_scene_from_camera` and renders the scene once per eye instead; see
+> `M2-FINDINGS.md`. The text below is kept for the reasoning.
+
 The game thread (the engine, lifted to C) produces one camera and one stream of draw calls per frame, and that thread is
 the single-threaded bottleneck. VR needs about 90 fps with two views, so the design goal is: **run the engine
 once per frame, and draw its output twice.**
