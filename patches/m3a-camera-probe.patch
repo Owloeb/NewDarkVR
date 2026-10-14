@@ -1,0 +1,29 @@
+diff --git a/port/core/fastpaths.c b/port/core/fastpaths.c
+index ba13283..0d8247b 100644
+--- a/port/core/fastpaths.c
++++ b/port/core/fastpaths.c
+@@ -142,3 +142,24 @@ int fp_006ebc90(CPU *c) {
+     c->eax = dst; c->edx = bm; c->ecx = (uint32_t)w;
+     return 1;
+ }
++
++/* ---- NewDarkVR M3a probe (diagnostic, never handles a call: always returns 0) ----
++ * Logs the camera the engine hands to render_scene_from_camera and how often it and render_frame_world run. */
++#include <time.h>
++extern void port_debug(const char *fmt, ...);
++static float vrf_(uint32_t a) { float f; uint32_t u = RD32(a); memcpy(&f, &u, 4); return f; }
++int fp_00601430(CPU *c) {
++    static unsigned n; n++;
++    if (n <= 20 || n % 120 == 0) {
++        uint32_t p = c->eax;
++        port_debug("M3a: render_scene_from_camera #%u t=%ldms eax=%08x pos %.3f %.3f %.3f cell %u bank %u pitch %u heading %u (%.1f deg) esp[0..2]=%08x %08x %08x",
++                   n, (long)clock(), p, vrf_(p), vrf_(p + 4), vrf_(p + 8), RD32(p + 12), RD16(p + 16), RD16(p + 18), RD16(p + 20), RD16(p + 20) * 360.0 / 65536.0,
++                   RD32(c->esp), RD32(c->esp + 4), RD32(c->esp + 8));
++    }
++    return 0;
++}
++int fp_006017d0(CPU *c) {
++    static unsigned n; n++;
++    if (n <= 20 || n % 120 == 0) port_debug("M3a: render_frame_world #%u t=%ldms", n, (long)clock());
++    (void)c; return 0;
++}

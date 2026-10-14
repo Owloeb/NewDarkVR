@@ -13,3 +13,10 @@ Diagnostic only. Every 120 presented frames it logs (through `port_debug`) what 
 - draws per frame for each FVF the engine uses
 
 Build the port with `port/build.py --target windows`, run the game, walk and look around, and send the `M2:` log lines.
+
+## m3a-camera-probe.patch
+
+Diagnostic only (adds two fast paths that log and always decline, so behaviour is unchanged). Logs every call of
+`render_scene_from_camera` (0x00601430: camera position, cell, bank/pitch/heading) and `render_frame_world` (0x006017d0)
+for the first 20 calls and then every 120th, with a millisecond timestamp. Needs `--fastpaths` on the build and `--verbose` at run time.
+Lines start with `M3a:`.
