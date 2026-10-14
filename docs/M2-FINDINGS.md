@@ -98,3 +98,12 @@ Measured by rendering the scene turned, tilted and shifted and matching the vert
 - **Sideways:** the camera's right-hand axis is (sin h, -cos h). The earlier "eyes swapped" fix from the side-by-side
   screenshot was wrong: the halves were cropped from a guessed window position, which faked the shift. Reverted.
 - Bank (roll) direction is not measured yet.
+
+## Sharpness: eye textures at the headset's resolution
+
+The engine's projected frame is symmetric and 16:9, while each Quest eye is taller than wide and off-centre. Instead of
+stretching a 16:9 canvas, each eye now renders into its own texture at the runtime's recommended size (2496x2688 on
+Quest 3 via VDXR), covering exactly that eye's field of view. `vr_d3d_view_map` in `d3d9.c` maps the engine's canvas
+pixels into that texture (a GL viewport larger than the texture, offset so the frame's tangent space lines up with the
+eye's); the GPU clips what falls outside, so only visible pixels are filled. The layer is submitted with the eye's own
+field of view. `NDVR_RES` scales the eye textures (supersampling above 1.0).

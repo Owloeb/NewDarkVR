@@ -36,10 +36,33 @@ index ba13283..f90af07 100644
 +extern int vr_scene_hook(CPU *c);
 +int fp_00601430(CPU *c) { return vr_scene_hook(c); }
 diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
-index 413e0da..0df89ad 100644
+index 413e0da..5ec91a6 100644
 --- a/port/dx/d3d9.c
 +++ b/port/dx/d3d9.c
-@@ -410,6 +410,17 @@ static void deferred_draw(void *data, PlatDrawFn submit) {             /* on the
+@@ -151,11 +151,21 @@ static void default_state(State *s, int zenable) {
+     for (int i = 0; i < MAX_LIGHTS; i++) { s->light[i].type = 3; s->light[i].diffuse[0] = s->light[i].diffuse[1] = s->light[i].diffuse[2] = 1.0f; s->light[i].dir[2] = 1.0f; }
+     s->vp[4] = f2u(0.0f); s->vp[5] = f2u(1.0f);
+ }
++/* NewDarkVR: while set, the engine's canvas pixels map to target pixels as x' = ox + x * kx, y' = oy + y * ky (port/core/vr_stereo.c) */
++static int vr_vpo; static float vr_vpo_ox, vr_vpo_oy, vr_vpo_kx, vr_vpo_ky;
+ static void apply_viewport(Device *d) {
+     PlatViewport v = { (int)d->st.vp[0], (int)d->st.vp[1], (int)d->st.vp[2], (int)d->st.vp[3], u2f(d->st.vp[4]), u2f(d->st.vp[5]) };
++    int sx = d->st.scissor[0], sy = d->st.scissor[1], sw = d->st.scissor[2] - d->st.scissor[0], sh = d->st.scissor[3] - d->st.scissor[1];
++    if (vr_vpo) {
++        v.x = (int)lroundf(vr_vpo_ox + v.x * vr_vpo_kx); v.y = (int)lroundf(vr_vpo_oy + v.y * vr_vpo_ky);
++        v.w = (int)lroundf(v.w * vr_vpo_kx); v.h = (int)lroundf(v.h * vr_vpo_ky);
++        sx = (int)lroundf(vr_vpo_ox + sx * vr_vpo_kx); sy = (int)lroundf(vr_vpo_oy + sy * vr_vpo_ky);
++        sw = (int)lroundf(sw * vr_vpo_kx); sh = (int)lroundf(sh * vr_vpo_ky);
++    }
+     plat_gfx_viewport(&v);
+-    plat_gfx_scissor((int)d->st.rs[174], d->st.scissor[0], d->st.scissor[1], d->st.scissor[2] - d->st.scissor[0], d->st.scissor[3] - d->st.scissor[1]);
++    plat_gfx_scissor((int)d->st.rs[174], sx, sy, sw, sh);
+ }
++void vr_d3d_view_map(int on, float ox, float oy, float kx, float ky) { vr_vpo = on; vr_vpo_ox = ox; vr_vpo_oy = oy; vr_vpo_kx = kx; vr_vpo_ky = ky; }
+ static void target_size(Device *d, uint32_t *w, uint32_t *h) {
+     Res *r = R(d->rt); if (!r || r->backbuffer) { *w = d->bb_w; *h = d->bb_h; return; }
+     if (r->container) { Res *t = R(r->container); *w = level_w(t, r->level); *h = level_h(t, r->level); } else { *w = r->w; *h = r->h; }
+@@ -410,6 +420,17 @@ static void deferred_draw(void *data, PlatDrawFn submit) {             /* on the
      for (int i = 0; i < h->nidx; i++) { uint16_t r = ix[i]; if (!done[r]) { done[r] = 1; vertex(&h->s, &h->L, &h->x, raw + (size_t)r * h->stride, &out[r]); } }
      submit(h->prim, out, (int)h->span, ix, h->nidx, &h->ps);
  }
@@ -57,7 +80,7 @@ index 413e0da..0df89ad 100644
  static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint32_t stride, uint32_t idx, int idx32, int32_t base_vertex, uint32_t min_index, uint32_t num_vertices) {
      uint32_t nseq; int plat_prim;
      if (!prims || !prim_counts(type, prims, &nseq, &plat_prim)) return;
-@@ -426,6 +437,7 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+@@ -426,6 +447,7 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
      }
      if (idx && num_vertices && hi - lo + 1 > num_vertices + min_index) { /* trust the indices */ }
      uint32_t span = hi - lo + 1;
@@ -65,7 +88,7 @@ index 413e0da..0df89ad 100644
      size_t maxidx = (size_t)nseq * 3 + 6;
      if (d->icap < (int)maxidx) { d->icap = (int)maxidx; d->ibuf = realloc(d->ibuf, (size_t)d->icap * sizeof *d->ibuf); }
      VState vs; vstate_of(&d->st, &vs);
-@@ -892,7 +904,8 @@ static void dev_setrt(CPU *c, ComObj *s) {
+@@ -892,7 +914,8 @@ static void dev_setrt(CPU *c, ComObj *s) {
  static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->rt) { OUTP(2, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->rt); OUTP(2, d->rt->guest); RET(0); }
  static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
  static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
@@ -75,7 +98,7 @@ index 413e0da..0df89ad 100644
  static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; RET(0); }
  static void dev_clear(CPU *c, ComObj *s) {
      Device *d = DEV(s); uint32_t n = A(1), rects = A(2), flags = A(3); float z = u2f(A(5));
-@@ -1068,3 +1081,16 @@ const ShimDef d3d9_shims[] = {
+@@ -1068,3 +1091,16 @@ const ShimDef d3d9_shims[] = {
      { "D3DXLoadSurfaceFromSurface", sh_D3DXLoadSurfaceFromSurface, STD(8) },
      { 0, 0, 0 }
  };

@@ -27,6 +27,7 @@
  *   NDVR_FLIP_SIDE   set to 1 to reverse sideways head movement (and so swap the eyes)
  *   NDVR_FLIP_Y      set to 0 if the headset image is upside down (default 1)
  *   NDVR_NO_POS      set to 1 to ignore the head's physical movement (rotation only)
+ *   NDVR_RES         eye resolution relative to the headset's recommended size (default 1.0, 0.25..2.0)
  * Run with SS2PORT_NOVSYNC=1 so the desktop window does not pace the headset. */
 #ifdef _WIN32
 #include <stdio.h>
@@ -40,6 +41,7 @@
 
 extern void nd_00601430(CPU *c);                                  /* the recompiled function itself */
 extern void vr_d3d_eye_begin(PlatTexture *t, int w, int h);       /* port/dx/d3d9.c */
+extern void vr_d3d_view_map(int on, float ox, float oy, float kx, float ky);
 extern void vr_d3d_restore(void);
 extern unsigned vr_gl_tex_fbo(PlatTexture *t, int *w, int *h);    /* port/backends/sdl2/gl_render.c */
 extern void *__stdcall wglGetCurrentDC(void);                      /* opengl32 */
@@ -69,6 +71,7 @@ static double wrap_pi(double a) { while (a > PI_D) a -= 2 * PI_D; while (a < -PI
 
 /* ---------------------------------------------------------------- state */
 static PlatTexture *eye_tex[2]; static int tex_w, tex_h;
+static PlatTexture *hmd_tex[2]; static int hmd_w[2], hmd_h[2]; static double res_scale = 1.0;   /* headset: one texture per eye at the headset's size */
 static int busy, mode = -1;                                       /* 0 off, 1 side-by-side preview, 2 headset */
 static float ipd = 0.207f;
 static double unit_m = 0.3048, fov_h = 90, fov_v = 0;
@@ -182,7 +185,7 @@ int vr_scene_hook(CPU *c) {
         const char *i = getenv("NDVR_IPD"); if (i && *i) ipd = (float)atof(i);
         unit_m = envd("NDVR_UNIT_M", 0.3048); fov_h = envd("NDVR_FOV_H", 0); fov_v = envd("NDVR_FOV_V", 0);
         flip_yaw = envi("NDVR_FLIP_YAW", 0); flip_pitch = envi("NDVR_FLIP_PITCH", 0); flip_roll = envi("NDVR_FLIP_ROLL", 0); flip_side = envi("NDVR_FLIP_SIDE", 0);
-        flip_y = envi("NDVR_FLIP_Y", 1); no_pos = envi("NDVR_NO_POS", 0);
+        flip_y = envi("NDVR_FLIP_Y", 1); res_scale = envd("NDVR_RES", 1.0); if (res_scale < 0.25) res_scale = 0.25; if (res_scale > 2.0) res_scale = 2.0; no_pos = envi("NDVR_NO_POS", 0);
         if (mode || zoom_mul > 0) port_debug("NDVR: %s mode; unit %.4f m, fov_h %.1f, fov_v %.1f, flips yaw %d pitch %d roll %d side %d y %d, no_pos %d, zoom x%.3f",
             mode == 2 ? "headset" : mode == 3 ? "calibration" : mode == 1 ? "side-by-side preview" : "normal", unit_m, fov_h, fov_v, flip_yaw, flip_pitch, flip_roll, flip_side, flip_y, no_pos, zoom_mul > 0 ? zoom_mul : 1.0);
     }
@@ -198,7 +201,7 @@ int vr_scene_hook(CPU *c) {
         if (xr_state == 0) glt_call(rt_init, NULL);
         if (xr_state < 0) { mode = 0; return 0; }
     }
-    if (!eye_tex[0] || W != tex_w || H != tex_h) {
+    if (mode != 2 && (!eye_tex[0] || W != tex_w || H != tex_h)) {
         for (int e = 0; e < 2; e++) { if (eye_tex[e]) plat_tex_destroy(eye_tex[e]); eye_tex[e] = plat_tex_create(W, H, 1, PLAT_TEX_RGBA8, 1); }
         tex_w = W; tex_h = H;
         if (!eye_tex[0] || !eye_tex[1]) { port_debug("NDVR: could not create the eye textures"); mode = 0; return 0; }
@@ -292,12 +295,30 @@ int vr_scene_hook(CPU *c) {
             wrf(p, x + (float)ex); wrf(p + 4, y + (float)ey); wrf(p + 8, z + (float)(along_u * k));
             WR16(p + 16, ang16(bank)); WR16(p + 18, ang16(pitch)); WR16(p + 20, ang16(heading));
             sub.pose[e] = *ep;
-            sub.fov[e].left = (float)-atan(th); sub.fov[e].right = (float)atan(th); sub.fov[e].up = (float)atan(tv); sub.fov[e].down = (float)-atan(tv);
+            /* The eye texture covers exactly this eye's field of view at the headset's resolution. The engine draws its whole
+             * (wider, symmetric) frame through a GL viewport placed so that the frame's tangent space lines up with the eye's;
+             * whatever falls outside the texture is clipped by the GPU. */
+            const ndvr_fov *f = &fr.eye[e].fov;
+            double L = tan(f->left), R = tan(f->right), U = tan(f->up), D = tan(f->down);
+            int tw = (int)(fr.eye[e].width * res_scale + 0.5), tht = (int)(fr.eye[e].height * res_scale + 0.5);
+            if (!hmd_tex[e] || hmd_w[e] != tw || hmd_h[e] != tht) {
+                if (hmd_tex[e]) plat_tex_destroy(hmd_tex[e]);
+                hmd_tex[e] = plat_tex_create(tw, tht, 1, PLAT_TEX_RGBA8, 1); hmd_w[e] = tw; hmd_h[e] = tht;
+                port_debug("NDVR: eye %d texture %dx%d, field of view L %.1f R %.1f U %.1f D %.1f deg", e, tw, tht,
+                           f->left * 180 / PI_D, f->right * 180 / PI_D, f->up * 180 / PI_D, f->down * 180 / PI_D);
+            }
+            double px = tw / (R - L), py = tht / (U - D);                         /* texture pixels per unit of tangent */
+            vr_d3d_view_map(1, (float)((-th - L) * px), (float)((U - tv) * py), (float)(2 * th * px / W), (float)(2 * tv * py / H));
+            sub.fov[e] = *f;
+            vr_d3d_eye_begin(hmd_tex[e], tw, tht);
+            nd_00601430(c);
+            continue;
         }
         vr_d3d_eye_begin(eye_tex[e], W, H);
         nd_00601430(c);
     }
     busy = 0;                                                      /* c is now as the original leaves it after returning */
+    vr_d3d_view_map(0, 0, 0, 1, 1);
     memcpy(GP(p), keep_cam, sizeof keep_cam);
     memcpy(GP(CAM_COPY), keep_copy, sizeof keep_copy);             /* everything else sees the engine's own camera */
     vr_d3d_restore();
@@ -305,8 +326,10 @@ int vr_scene_hook(CPU *c) {
         plat_gfx_copy(eye_tex[0], 0, 0, W, H, NULL, 0, 0, W / 2, H, 1);
         plat_gfx_copy(eye_tex[1], 0, 0, W, H, NULL, W / 2, 0, W - W / 2, H, 1);
     } else {
-        plat_gfx_copy(eye_tex[0], 0, 0, W, H, NULL, 0, 0, W, H, 1);   /* the desktop window mirrors the left eye */
-        sub.rendered = 1; sub.tex[0] = eye_tex[0]; sub.tex[1] = eye_tex[1]; sub.flip = flip_y;
+        { int mw = W, mh = (int)((double)W * hmd_h[0] / hmd_w[0]); if (mh > H) { mh = H; mw = (int)((double)H * hmd_w[0] / hmd_h[0]); }
+          plat_gfx_clear(1, 0xFF000000u, 0, 1.0f, 0, 0);
+          plat_gfx_copy(hmd_tex[0], 0, 0, hmd_w[0], hmd_h[0], NULL, (W - mw) / 2, (H - mh) / 2, mw, mh, 1); }   /* the desktop window mirrors the left eye */
+        sub.rendered = 1; sub.tex[0] = hmd_tex[0]; sub.tex[1] = hmd_tex[1]; sub.flip = flip_y;
         plat_gfx_deferred(rt_submit, &sub, sizeof sub);
     }
     acc += clock() - t0;
