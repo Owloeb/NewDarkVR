@@ -19,6 +19,7 @@
  *   NDVR_FOV_H       horizontal field of view in degrees the engine renders with (default 90)
  *   NDVR_FOV_V       vertical field of view in degrees (default: from the canvas aspect ratio)
  *   NDVR_FLIP_YAW / NDVR_FLIP_PITCH / NDVR_FLIP_ROLL   set to 1 to reverse that axis
+ *   NDVR_FLIP_SIDE   set to 1 to reverse sideways head movement (and so swap the eyes)
  *   NDVR_FLIP_Y      set to 0 if the headset image is upside down (default 1)
  *   NDVR_NO_POS      set to 1 to ignore the head's physical movement (rotation only)
  * Run with SS2PORT_NOVSYNC=1 so the desktop window does not pace the headset. */
@@ -65,7 +66,7 @@ static PlatTexture *eye_tex[2]; static int tex_w, tex_h;
 static int busy, mode = -1;                                       /* 0 off, 1 side-by-side preview, 2 headset */
 static float ipd = 0.207f;
 static double unit_m = 0.3048, fov_h = 90, fov_v = 0;
-static int flip_yaw, flip_pitch, flip_roll, flip_y = 1, no_pos;
+static int flip_yaw, flip_pitch, flip_roll, flip_side, flip_y = 1, no_pos;
 static unsigned frames; static clock_t acc;
 
 /* headset */
@@ -110,7 +111,7 @@ int vr_scene_hook(CPU *c) {
         mode = envi("NDVR_VR", 0) ? 2 : envi("NDVR_STEREO", 0) ? 1 : 0;
         const char *i = getenv("NDVR_IPD"); if (i && *i) ipd = (float)atof(i);
         unit_m = envd("NDVR_UNIT_M", 0.3048); fov_h = envd("NDVR_FOV_H", 90); fov_v = envd("NDVR_FOV_V", 0);
-        flip_yaw = envi("NDVR_FLIP_YAW", 0); flip_pitch = envi("NDVR_FLIP_PITCH", 0); flip_roll = envi("NDVR_FLIP_ROLL", 0);
+        flip_yaw = envi("NDVR_FLIP_YAW", 0); flip_pitch = envi("NDVR_FLIP_PITCH", 0); flip_roll = envi("NDVR_FLIP_ROLL", 0); flip_side = envi("NDVR_FLIP_SIDE", 0);
         flip_y = envi("NDVR_FLIP_Y", 1); no_pos = envi("NDVR_NO_POS", 0);
         if (mode) port_debug("NDVR: %s mode", mode == 2 ? "headset" : "side-by-side preview");
     }
@@ -159,13 +160,13 @@ int vr_scene_hook(CPU *c) {
             const ndvr_pose *ep = &fr.eye[e].pose;
             HeadAngles ha = head_angles(ep->orientation);
             double yaw_rel = wrap_pi(ha.yaw - ref_yaw);
-            double heading = body_h + (flip_yaw ? 1.0 : -1.0) * yaw_rel;     /* engine heading grows turning right, head yaw grows turning left */
-            double pitch = (flip_pitch ? 1.0 : -1.0) * ha.pitch;             /* guess: positive engine pitch looks down */
+            double heading = body_h + (flip_yaw ? -1.0 : 1.0) * yaw_rel;     /* verified in the headset: engine heading grows turning left, like head yaw */
+            double pitch = (flip_pitch ? -1.0 : 1.0) * ha.pitch;             /* verified in the headset: positive engine pitch looks up */
             double bank = (flip_roll ? -1.0 : 1.0) * ha.roll;
             V3 d = v3(ep->position.x - ref_pos.x, ep->position.y - ref_pos.y, ep->position.z - ref_pos.z);
             if (no_pos) d = v3(0, 0, 0);
             V3 fr_ref = v3(-sin(ref_yaw), 0, -cos(ref_yaw)), rr_ref = v3(cos(ref_yaw), 0, -sin(ref_yaw));
-            double along_f = dot(d, fr_ref), along_r = dot(d, rr_ref), along_u = d.y;
+            double along_f = dot(d, fr_ref), along_r = (flip_side ? -1.0 : 1.0) * dot(d, rr_ref), along_u = d.y;
             double k = 1.0 / unit_m;
             double ex = (cos(body_h) * along_f - sin(body_h) * along_r) * k, ey = (sin(body_h) * along_f + cos(body_h) * along_r) * k;
             wrf(p, x + (float)ex); wrf(p + 4, y + (float)ey); wrf(p + 8, z + (float)(along_u * k));
