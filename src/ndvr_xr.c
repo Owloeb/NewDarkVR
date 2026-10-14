@@ -753,6 +753,7 @@ void ndvr_shutdown(void)
 
 int ndvr_session_running(void) { return g_running; }
 int ndvr_wants_exit(void) { return g_exit; }
+int ndvr_focused(void) { return g_state == XR_SESSION_STATE_FOCUSED; }
 
 /* ------------------------------------------------------------------------- */
 /* events                                                                     */

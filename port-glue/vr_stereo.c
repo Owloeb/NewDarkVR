@@ -16,7 +16,8 @@
  * Headset camera. The engine's own heading (mouse look, later thumbstick) is the body. The head turns relative to
  * it: engine heading = body heading + head yaw since the last recentre; pitch and roll come from the head; eye
  * position = engine eye position + the head's physical movement since the recentre, turned by the body heading.
- * Recentre: automatic on the first frame, then with the left controller's menu button.
+ * Recentre: automatic on the first frame and whenever the headset goes on (session focus gained), and with the left
+ * controller's menu button.
  *
  * Tuning (environment variables, all optional):
  *   NDVR_UNIT_M      metres per engine unit (default 0.3048, a foot)
@@ -82,7 +83,7 @@ static double zoom_mul = 0; static int zoom_warned;
 /* headset */
 static int xr_state;                                              /* 0 not tried, 1 running, -1 failed */
 static ndvr_frame fr; static int fr_ok;
-static int ref_valid; static double ref_yaw; static V3 ref_pos; static uint32_t prev_btn;
+static int ref_valid, was_focused; static double ref_yaw; static V3 ref_pos; static uint32_t prev_btn;
 
 static void xr_log(const char *line) { port_debug("NDVR: %s", line); }
 static void rt_init(void *a) {
@@ -241,11 +242,14 @@ int vr_scene_hook(CPU *c) {
             Submit s; memset(&s, 0, sizeof s); plat_gfx_deferred(rt_submit, &s, sizeof s);
             return 0;
         }
-        if (!ref_valid || ((fr.hand[0].buttons & NDVR_BTN_MENU) && !(prev_btn & NDVR_BTN_MENU))) {
+        int focused = ndvr_focused();                             /* recentre when the headset goes on (focus gained), on the */
+        if (!ref_valid || (focused && !was_focused) ||            /* first frame, and with the left controller's menu button */
+            ((fr.hand[0].buttons & NDVR_BTN_MENU) && !(prev_btn & NDVR_BTN_MENU))) {
             HeadAngles ha = head_angles(fr.head.orientation);
             ref_yaw = ha.yaw; ref_pos = v3(fr.head.position.x, fr.head.position.y, fr.head.position.z); ref_valid = 1;
         }
         prev_btn = fr.hand[0].buttons;
+        was_focused = focused;
     }
 
     uint32_t p = c->eax;

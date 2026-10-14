@@ -94,6 +94,8 @@ void        ndvr_set_log(void (*fn)(const char *line));
 
 /* 1 once the runtime has started the session (headset on and focused or visible). */
 int         ndvr_session_running(void);
+/* 1 while the session is focused: the headset is on and the app has input (Quest: headset worn, app in front). */
+int         ndvr_focused(void);
 /* 1 if the runtime asked the app to quit (user pressed Home -> Quit, headset lost, ...). */
 int         ndvr_wants_exit(void);
 
