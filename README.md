@@ -33,12 +33,11 @@ graphics binding (`XR_KHR_opengl_enable`), because the port renders with OpenGL.
 |---|---|---|
 | Quest Link / Air Link | Meta Quest Link app, Settings, General | expected to work |
 | SteamVR (also what Virtual Desktop streams) | SteamVR, Settings, OpenXR, set as runtime | expected to work |
-| Virtual Desktop's own runtime (VDXR) | Virtual Desktop Streamer, Settings, OpenXR runtime | **not confirmed, please test** |
+| Virtual Desktop's own runtime (VDXR) | Virtual Desktop Streamer, Settings, OpenXR runtime | **works** (VirtualDesktopXR 1.0.10, NVIDIA GL 4.6, Quest 3, 100 fps) |
 
-Virtual Desktop does support OpenXR: it ships its own runtime, VDXR, alongside the SteamVR path. If you stream
-with Virtual Desktop, try both of its runtime choices. `ndvr_gltest.exe` prints the active runtime, its name and
-version, and every graphics API it offers, and if OpenGL is missing it says so and what to change. Paste me that output
-for your setup and I'll fill in the table.
+Virtual Desktop supports OpenXR through its own runtime, VDXR, alongside the SteamVR path, and VDXR offers OpenGL.
+`ndvr_gltest.exe` prints the active runtime, its name and version, and every graphics API it offers, and if OpenGL
+is missing it says so and what to change. If your setup behaves differently, open an issue with that output.
 
 If a runtime turns out to be D3D11-only, the planned fix is to render in OpenGL and hand the frames to a D3D11
 swapchain through `WGL_NV_DX_interop2`, so the mod works on any runtime.
@@ -62,16 +61,16 @@ No binaries are downloaded.
 
 | Milestone | What | State |
 |---|---|---|
-| M0 | OpenXR session on the port's GL context, tracking and input | module written and compiles; needs a headset test |
-| M1 | Standalone stereo scene in the headset (cube, grid, hands) | `ndvr_gltest.exe`, same state |
+| M0 | OpenXR session on a GL context, tracking and input | **done, verified on Quest 3 via Virtual Desktop** |
+| M1 | Standalone stereo scene in the headset (cube, grid, hands) | **done, verified** (`ndvr_gltest.exe`, 100 fps) |
 | M2 | Find the camera and the per-frame view/projection in the port | not started |
 | M3 | Stereo: draw the world once per eye into the eye framebuffers | not started |
 | M4 | Head decoupled from body, snap turn, physical crouch | not started |
 | M5 | Tracked hands and weapons, aim and frob from the controller, handedness option | not started |
 | M6 | HUD and inventory on a pointable panel | not started |
 
-The binaries are cross-compiled on Linux and have not been run on a Windows machine with a headset yet. The first
-run is the real test, so please report what the console prints.
+The binaries are cross-compiled on Linux. They have been run on one setup so far (Quest 3, Virtual Desktop's VDXR
+runtime, NVIDIA GPU). Quest Link and SteamVR are untested, so reports are welcome.
 
 ## What's here
 

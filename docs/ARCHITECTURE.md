@@ -88,8 +88,9 @@ use. Today that is OpenGL (`XR_KHR_opengl_enable`), because the port renders thr
 runtime (registry `ActiveRuntime`, `XR_RUNTIME_JSON` override, and the runtime's reported name and version) and every
 `XR_KHR_*_enable` extension it offers, and fails early with a specific message if OpenGL is missing.
 
-Virtual Desktop streams through two OpenXR paths: SteamVR as the runtime, or its own runtime (VDXR). Whether VDXR
-exposes OpenGL is unconfirmed, so the first real-world data point decides whether a fallback is needed.
+Virtual Desktop streams through two OpenXR paths: SteamVR as the runtime, or its own runtime (VDXR). Verified:
+VDXR 1.0.10 offers `XR_KHR_opengl_enable` alongside D3D11, D3D12 and Vulkan, and the stereo test ran at 100 fps
+on it, so no fallback is needed for that setup.
 
 Fallback if a runtime is D3D11-only: keep rendering in OpenGL, create the OpenXR session on a D3D11 device, and copy
 each eye through `WGL_NV_DX_interop2` (register the D3D11 swapchain texture as a GL texture for the duration of the
