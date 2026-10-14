@@ -11,8 +11,7 @@ The port's sdl2 backend renders through OpenGL (`gl_render.c`), and OpenXR has a
 creates one swapchain per eye, and wraps every swapchain image in a framebuffer with a depth/stencil
 renderbuffer. The renderer draws into those framebuffers instead of (or as well as) the window.
 
-File and function names for the port in this document (`gl_render.c`, `plat_sdl2.c`, `port/dx/d3d9.c`) come from the
-port's author and have not been checked against the code from this repo yet.
+`port/dx/d3d9.c` and `plat.h` have been read (see `M2-FINDINGS.md`); `gl_render.c` and `plat_sdl2.c` names are still unchecked.
 
 ## 2. Rules the module relies on
 
