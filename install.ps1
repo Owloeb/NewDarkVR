@@ -36,8 +36,10 @@ if ($rt) {
     Write-Host "Active OpenXR runtime: $rt"
 } else {
     Write-Host ""
-    Write-Host "No active OpenXR runtime is registered yet. In the Meta Quest Link app, open"
-    Write-Host "Settings > General and set Meta Quest Link as the OpenXR runtime."
+    Write-Host "No active OpenXR runtime is registered yet. Pick one for your headset:"
+    Write-Host "  Quest Link:      Meta Quest Link app > Settings > General > OpenXR runtime"
+    Write-Host "  Virtual Desktop: Streamer > Settings > OpenXR runtime"
+    Write-Host "  SteamVR:         Settings > OpenXR > set SteamVR as the OpenXR runtime"
 }
 
 if ($Run) {

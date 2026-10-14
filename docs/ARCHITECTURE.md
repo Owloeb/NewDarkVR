@@ -80,3 +80,18 @@ port has to expose is small, and M2 will pin it down:
 - **M2:** a log line per frame with the camera position and orientation while you walk and look around,
   plus the D3D9 transform/format statistics above.
 - **M3:** correct depth in both eyes with the head still, in the actual game.
+
+## 6. Runtime compatibility
+
+The module speaks plain OpenXR, so any conformant runtime works as long as it offers a graphics binding the port can
+use. Today that is OpenGL (`XR_KHR_opengl_enable`), because the port renders through GL. `ndvr_init` logs the active
+runtime (registry `ActiveRuntime`, `XR_RUNTIME_JSON` override, and the runtime's reported name and version) and every
+`XR_KHR_*_enable` extension it offers, and fails early with a specific message if OpenGL is missing.
+
+Virtual Desktop streams through two OpenXR paths: SteamVR as the runtime, or its own runtime (VDXR). Whether VDXR
+exposes OpenGL is unconfirmed, so the first real-world data point decides whether a fallback is needed.
+
+Fallback if a runtime is D3D11-only: keep rendering in OpenGL, create the OpenXR session on a D3D11 device, and copy
+each eye through `WGL_NV_DX_interop2` (register the D3D11 swapchain texture as a GL texture for the duration of the
+frame). That keeps the engine side unchanged and works on any runtime that offers D3D11. The `ndvr.h` API would not
+change; only `src/ndvr_xr.c` grows a second backend.

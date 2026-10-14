@@ -84,7 +84,7 @@ static int loadGL(void)
 /* ------------------------------------------------------------------------- */
 
 static void (*g_log)(const char *) = NULL;
-static char g_err[256];
+static char g_err[512];
 
 static void defaultLog(const char *line)
 {
@@ -130,7 +130,7 @@ const char *ndvr_last_error(void) { return g_err; }
     X(xrCreateActionSet) X(xrDestroyActionSet) X(xrCreateAction)                               \
     X(xrSuggestInteractionProfileBindings) X(xrAttachSessionActionSets) X(xrSyncActions)       \
     X(xrGetActionStateFloat) X(xrGetActionStateBoolean) X(xrGetActionStateVector2f)            \
-    X(xrGetOpenGLGraphicsRequirementsKHR)
+    X(xrGetInstanceProperties) X(xrGetOpenGLGraphicsRequirementsKHR)
 
 static struct {
 #define X(n) PFN_##n n;
@@ -478,6 +478,58 @@ static int createActions(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* runtime diagnostics                                                        */
+/* ------------------------------------------------------------------------- */
+
+/* Which OpenXR runtime is active (Quest Link, SteamVR, Virtual Desktop's VDXR, ...) is a
+ * per-machine setting, so say which one we are talking to. */
+static void logActiveRuntime(void)
+{
+    char buf[512];
+    DWORD sz = sizeof buf;
+    const char *env = getenv("XR_RUNTIME_JSON");
+    if (env && *env)
+        logf_("XR_RUNTIME_JSON override: %s", env);
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Khronos\\OpenXR\\1", "ActiveRuntime", RRF_RT_REG_SZ, NULL, buf,
+                     &sz) == ERROR_SUCCESS)
+        logf_("active OpenXR runtime: %s", buf);
+    else
+        logf_("no ActiveRuntime registered under HKLM\\SOFTWARE\\Khronos\\OpenXR\\1");
+}
+
+/* Returns 1 if the runtime offers XR_KHR_opengl_enable, 0 if it does not, -1 if it could not
+ * be determined. Also logs the graphics bindings the runtime does offer. */
+static int runtimeHasOpenGL(void)
+{
+    PFN_xrEnumerateInstanceExtensionProperties en = NULL;
+    uint32_t n = 0, i;
+    XrExtensionProperties *p;
+    int gl = 0;
+
+    if (XR_FAILED(g_getProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties",
+                                (PFN_xrVoidFunction *)&en)) || !en)
+        return -1;
+    if (XR_FAILED(en(NULL, 0, &n, NULL)) || n == 0)
+        return -1;
+    p = (XrExtensionProperties *)calloc(n, sizeof *p);
+    for (i = 0; i < n; ++i)
+        p[i].type = XR_TYPE_EXTENSION_PROPERTIES;
+    if (XR_FAILED(en(NULL, n, &n, p))) {
+        free(p);
+        return -1;
+    }
+    for (i = 0; i < n; ++i) {
+        const char *nm = p[i].extensionName;
+        if (!strcmp(nm, XR_KHR_OPENGL_ENABLE_EXTENSION_NAME))
+            gl = 1;
+        if (!strncmp(nm, "XR_KHR_", 7) && strstr(nm, "_enable"))
+            logf_("  runtime offers %s", nm);
+    }
+    free(p);
+    return gl;
+}
+
+/* ------------------------------------------------------------------------- */
 /* init / shutdown                                                            */
 /* ------------------------------------------------------------------------- */
 
@@ -518,6 +570,15 @@ int ndvr_init(void *hdc, void *hglrc)
         return 0;
     }
 
+    logActiveRuntime();
+    if (runtimeHasOpenGL() == 0) {
+        fail("The active OpenXR runtime does not offer OpenGL (XR_KHR_opengl_enable). "
+             "Switch runtime: in Virtual Desktop Streamer set the OpenXR runtime to SteamVR; with "
+             "Quest Link set Meta Quest Link as the OpenXR runtime. If it persists, send the lines "
+             "above (they list what the runtime does support).");
+        return 0;
+    }
+
     exts[0] = XR_KHR_OPENGL_ENABLE_EXTENSION_NAME;
     memset(&ici, 0, sizeof ici);
     ici.type = XR_TYPE_INSTANCE_CREATE_INFO;
@@ -541,6 +602,15 @@ int ndvr_init(void *hdc, void *hglrc)
     }
     XR_FN_LIST(X)
 #undef X
+
+    {
+        XrInstanceProperties ip;
+        memset(&ip, 0, sizeof ip);
+        ip.type = XR_TYPE_INSTANCE_PROPERTIES;
+        if (XR_SUCCEEDED(fn.xrGetInstanceProperties(g_inst, &ip)))
+            logf_("runtime: %s %u.%u.%u", ip.runtimeName, (unsigned)XR_VERSION_MAJOR(ip.runtimeVersion),
+                  (unsigned)XR_VERSION_MINOR(ip.runtimeVersion), (unsigned)XR_VERSION_PATCH(ip.runtimeVersion));
+    }
 
     memset(&gi, 0, sizeof gi);
     gi.type = XR_TYPE_SYSTEM_GET_INFO;

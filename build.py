@@ -137,16 +137,19 @@ def build_test():
         "-I" + os.path.join(ROOT, "include"),
         "-I" + os.path.join(ROOT, "third_party", "openxr", "include"),
         "tools/ndvr_gltest.c", "src/ndvr_xr.c",
-        "-o", OUT_TEST, "-lopengl32", "-lgdi32", "-luser32")
+        "-o", OUT_TEST, "-lopengl32", "-lgdi32", "-luser32", "-ladvapi32")
 
 
 # --------------------------------------------------------------------------- release zip
 
 README_FIRST = """NewDarkVR stereo test (Windows 64-bit)
 
-1. Connect your Quest with Quest Link or Air Link, and make sure Quest Link is the active
-   OpenXR runtime (Meta Quest Link app > Settings > General).
+1. Connect your headset and pick an OpenXR runtime that offers OpenGL:
+     - Quest Link / Air Link: Meta Quest Link app > Settings > General > set as OpenXR runtime
+     - Virtual Desktop: Streamer > Settings > OpenXR runtime (try SteamVR, or VirtualDesktopXR)
+     - SteamVR: SteamVR > Settings > OpenXR > set SteamVR as the OpenXR runtime
 2. Double-click ndvr_gltest.exe (keep openxr_loader.dll next to it) and put the headset on.
+   The console prints which runtime it found and which graphics APIs it offers.
 3. You should see a spinning cube 1.5 m ahead with real depth, a floor grid, and a cube on each
    controller (blue left, orange right). The world must stay put when you turn your head.
    Esc or closing the window quits.

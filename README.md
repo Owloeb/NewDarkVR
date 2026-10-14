@@ -10,8 +10,8 @@ No game content or game-derived code is in this repo.
 
 ## Try it (about a minute, no game needed)
 
-1. Connect your Quest with Quest Link or Air Link and make sure Quest Link is the active OpenXR runtime
-   (Meta Quest Link app, Settings, General).
+1. Connect your headset and make sure the active OpenXR runtime is one that offers OpenGL
+   (see [Runtimes](#runtimes) below: Quest Link, SteamVR, or Virtual Desktop).
 2. Download **`NewDarkVR-test-win64.zip`** from the [Releases](../../releases) page and unzip it anywhere.
 3. Run `ndvr_gltest.exe` and put the headset on.
 
@@ -21,6 +21,25 @@ the console window says which OpenXR call failed and why.
 
 No release yet? Every push is built by GitHub Actions: open the latest run under the Actions tab and download the
 `NewDarkVR-test-win64` artifact.
+
+## Runtimes
+
+The mod talks standard OpenXR, so it is not tied to one headset app. It needs a runtime that offers the OpenGL
+graphics binding (`XR_KHR_opengl_enable`), because the port renders with OpenGL.
+
+| Setup | How to select the runtime | OpenGL |
+|---|---|---|
+| Quest Link / Air Link | Meta Quest Link app, Settings, General | expected to work |
+| SteamVR (also what Virtual Desktop streams) | SteamVR, Settings, OpenXR, set as runtime | expected to work |
+| Virtual Desktop's own runtime (VDXR) | Virtual Desktop Streamer, Settings, OpenXR runtime | **not confirmed, please test** |
+
+Virtual Desktop does support OpenXR: it ships its own runtime, VDXR, alongside the SteamVR path. If you stream
+with Virtual Desktop, try both of its runtime choices. `ndvr_gltest.exe` prints the active runtime, its name and
+version, and every graphics API it offers, and if OpenGL is missing it says so and what to change. Paste me that output
+for your setup and I'll fill in the table.
+
+If a runtime turns out to be D3D11-only, the planned fix is to render in OpenGL and hand the frames to a D3D11
+swapchain through `WGL_NV_DX_interop2`, so the mod works on any runtime.
 
 ## Build from source
 
