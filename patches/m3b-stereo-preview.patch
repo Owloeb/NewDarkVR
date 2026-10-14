@@ -1,0 +1,118 @@
+diff --git a/port/core/fastpaths.c b/port/core/fastpaths.c
+index ba13283..f90af07 100644
+--- a/port/core/fastpaths.c
++++ b/port/core/fastpaths.c
+@@ -142,3 +142,7 @@ int fp_006ebc90(CPU *c) {
+     c->eax = dst; c->edx = bm; c->ecx = (uint32_t)w;
+     return 1;
+ }
++
++/* ---- NewDarkVR: render_scene_from_camera (0x00601430) -> port/core/vr_stereo.c ---- */
++extern int vr_scene_hook(CPU *c);
++int fp_00601430(CPU *c) { return vr_scene_hook(c); }
+diff --git a/port/core/vr_stereo.c b/port/core/vr_stereo.c
+new file mode 100644
+index 0000000..2f416fe
+--- /dev/null
++++ b/port/core/vr_stereo.c
+@@ -0,0 +1,69 @@
++/* NewDarkVR M3b: stereo preview. Part of the NewDarkVR patch set (github.com/Owloeb/NewDarkVR), not vanilla.
++ *
++ * The engine transforms and projects the world itself and hands the Direct3D layer screen-space vertices, so there is no
++ * view matrix to change per eye. Instead this runs the engine's own scene render twice per frame, once per eye, from a
++ * camera moved sideways by half the eye separation, into two render-target textures, then shows them side by side.
++ *
++ *   hooked function  render_scene_from_camera (0x00601430), eax -> { float x, y, z; u32 cell; u16 bank, pitch, heading }
++ *
++ * Off unless the environment variable NDVR_STEREO is set (so the same exe plays normally). NDVR_IPD sets the eye
++ * separation in engine units (default 0.207, about 63 mm if a unit is a foot).
++ * Build the port with --fastpaths; fastpaths.c forwards fp_00601430 to vr_scene_hook(). */
++#include <stdio.h>
++#include <stdlib.h>
++#include <math.h>
++#include <time.h>
++#include "core.h"
++#include "plat.h"
++
++extern void nd_00601430(CPU *c);                                  /* the recompiled function itself */
++extern void vr_d3d_eye_begin(PlatTexture *t, int w, int h);       /* port/dx/d3d9.c */
++extern void vr_d3d_restore(void);
++
++#define CAM_COPY 0x00a57e00u                                      /* the engine's copy of the render camera (24 bytes used) */
++static float rdf(uint32_t a) { float f; uint32_t u = RD32(a); memcpy(&f, &u, 4); return f; }
++static void wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); WR32(a, u); }
++
++static PlatTexture *eye_tex[2]; static int tex_w, tex_h;
++static int busy, enabled = -1; static float ipd = 0.207f;
++static unsigned frames; static clock_t acc;
++
++int vr_scene_hook(CPU *c) {
++    if (busy) return 0;                                           /* our own nested call: let the original run */
++    if (enabled < 0) {
++        const char *e = getenv("NDVR_STEREO"), *i = getenv("NDVR_IPD");
++        enabled = e && *e && *e != '0'; if (i && *i) ipd = (float)atof(i);
++        if (enabled) port_debug("NDVR: stereo preview on, eye separation %.3f engine units", ipd);
++    }
++    if (!enabled) return 0;
++    int W, H; plat_video_window_size(&W, &H);
++    if (W <= 0 || H <= 0) return 0;
++    if (!eye_tex[0] || W != tex_w || H != tex_h) {
++        for (int e = 0; e < 2; e++) { if (eye_tex[e]) plat_tex_destroy(eye_tex[e]); eye_tex[e] = plat_tex_create(W, H, 1, PLAT_TEX_RGBA8, 1); }
++        tex_w = W; tex_h = H;
++        if (!eye_tex[0] || !eye_tex[1]) { port_debug("NDVR: could not create the eye textures"); enabled = 0; return 0; }
++    }
++    clock_t t0 = clock();
++    uint32_t p = c->eax;
++    float x = rdf(p), y = rdf(p + 4);
++    double h = (double)RD16(p + 20) * (6.283185307179586 / 65536.0);          /* heading 0 = +x, counter-clockwise, 65536 = 360 deg */
++    float rx = (float)sin(h), ry = (float)-cos(h);                             /* the camera's right-hand direction */
++    uint8_t keep[32]; memcpy(keep, GP(CAM_COPY), sizeof keep);
++    CPU saved = *c; busy = 1;
++    for (int e = 0; e < 2; e++) {
++        float s = (e ? 0.5f : -0.5f) * ipd;
++        *c = saved;
++        wrf(p, x + rx * s); wrf(p + 4, y + ry * s);
++        vr_d3d_eye_begin(eye_tex[e], W, H);
++        nd_00601430(c);
++    }
++    busy = 0;                                                      /* c is now as the original leaves it after returning */
++    wrf(p, x); wrf(p + 4, y);
++    memcpy(GP(CAM_COPY), keep, sizeof keep);                       /* everything else sees the centre camera */
++    vr_d3d_restore();
++    plat_gfx_copy(eye_tex[0], 0, 0, W, H, NULL, 0, 0, W / 2, H, 1);
++    plat_gfx_copy(eye_tex[1], 0, 0, W, H, NULL, W / 2, 0, W - W / 2, H, 1);
++    acc += clock() - t0;
++    if (++frames % 120 == 0) { port_debug("NDVR: two scene renders took %.2f ms per frame (CPU side), camera %.2f %.2f %.2f heading %u", 1000.0 * acc / CLOCKS_PER_SEC / 120, x, y, rdf(p + 8), RD16(p + 20)); acc = 0; }
++    return 1;
++}
+diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
+index 413e0da..2639a27 100644
+--- a/port/dx/d3d9.c
++++ b/port/dx/d3d9.c
+@@ -892,7 +892,8 @@ static void dev_setrt(CPU *c, ComObj *s) {
+ static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->rt) { OUTP(2, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->rt); OUTP(2, d->rt->guest); RET(0); }
+ static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
+ static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
+-static void dev_beginscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 1; RET(0); }
++static Device *g_vr_dev;   /* NewDarkVR: the device, for vr_d3d_* below */
++static void dev_beginscene(CPU *c, ComObj *s) { Device *d = DEV(s); g_vr_dev = d; if (d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 1; RET(0); }
+ static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; RET(0); }
+ static void dev_clear(CPU *c, ComObj *s) {
+     Device *d = DEV(s); uint32_t n = A(1), rects = A(2), flags = A(3); float z = u2f(A(5));
+@@ -1068,3 +1069,16 @@ const ShimDef d3d9_shims[] = {
+     { "D3DXLoadSurfaceFromSurface", sh_D3DXLoadSurfaceFromSurface, STD(8) },
+     { 0, 0, 0 }
+ };
++
++/* ---- NewDarkVR (port/core/vr_stereo.c): redirect the engine's draws into an eye texture and back. ---- */
++void vr_d3d_eye_begin(PlatTexture *t, int w, int h) {
++    plat_gfx_set_target(t);
++    plat_gfx_scissor(0, 0, 0, w, h);
++    PlatViewport v = { 0, 0, w, h, 0.0f, 1.0f }; plat_gfx_viewport(&v);
++    plat_gfx_clear(1, 0xFF000000u, 1, 1.0f, 0, 0);
++    if (g_vr_dev) apply_viewport(g_vr_dev);                         /* the engine's own viewport and scissor again */
++}
++void vr_d3d_restore(void) {
++    if (!g_vr_dev) return;
++    plat_gfx_set_target(surface_target(R(g_vr_dev->rt))); apply_viewport(g_vr_dev);
++}

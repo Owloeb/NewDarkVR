@@ -20,3 +20,13 @@ Diagnostic only (adds two fast paths that log and always decline, so behaviour i
 `render_scene_from_camera` (0x00601430: camera position, cell, bank/pitch/heading) and `render_frame_world` (0x006017d0)
 for the first 20 calls and then every 120th, with a millisecond timestamp. Needs `--fastpaths` on the build and `--verbose` at run time.
 Lines start with `M3a:`.
+
+## m3b-stereo-preview.patch
+
+First real stereo: runs the engine's scene render twice per frame (once per eye, camera moved sideways by half the eye
+separation) into two render textures, and shows them side by side in the window. Replaces `m3a-camera-probe.patch`
+(run `git checkout port/core/fastpaths.c` first if m3a is applied). Combines with the M2 patch.
+
+- adds `port/core/vr_stereo.c` (new), a forwarder in `port/core/fastpaths.c`, and two small functions at the end of `port/dx/d3d9.c`
+- build with `--fastpaths`; off unless `NDVR_STEREO=1` is set in the environment; `NDVR_IPD` sets the separation in engine units (default 0.207)
+- logs `NDVR:` lines with `--verbose`, including the CPU time of the two renders

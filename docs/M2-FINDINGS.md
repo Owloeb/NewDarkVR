@@ -62,3 +62,17 @@ the eye offset crosses a portal (rare at IPD scale; do a cell lookup when it doe
 - the engine's near/far planes, fov and aspect (`proj` in the log)
 - engine units per metre (compare camera movement per step with a known distance)
 - whether any engine-side culling uses a frustum that must be widened for the headset's field of view
+
+## M3a probe result
+
+From a real play session (`patches/m3a-camera-probe.patch`):
+
+- `render_frame_world` and `render_scene_from_camera` run exactly once per frame, in lockstep (about 97 per second at 2560x1440).
+- The camera struct sits on the guest stack (eax = `0x0312fccc`, a local of `render_frame_world`) and matches the layout in
+  `symbols/manual.sym`: floats x, y, z, then a cell id, then u16 bank, pitch, heading. Heading 16384 = 90 degrees (65536 = 360);
+  pitch and bank are signed. `cell` is `0xFFFFFFFF` at entry, so the engine finds the cell itself and a sideways eye offset
+  needs no cell lookup.
+- Moving forward facing 90 degrees increased y, so forward = (cos heading, sin heading) and right = (sin heading, -cos heading).
+- z sat near 7.0 to 7.7 while standing, which suggests one engine unit is about a foot (to confirm).
+- The function also takes stack arguments (a double, 1.0). The recompiled code ignores return addresses, so a hook can call
+  the lifted function itself and then restore the CPU state, without knowing the argument count.
