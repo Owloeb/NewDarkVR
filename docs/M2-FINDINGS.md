@@ -85,3 +85,16 @@ First run of the stereo preview (`patches/m3b-stereo-preview.patch`, a real leve
 - CPU time for the two scene renders: 2.4 to 7.2 ms per frame (about 5 ms typical, up to 374 draws per frame). The base game ran at about 97 fps, so VR's 90 fps budget fits.
 - The first build had the eyes swapped. Cross-correlating the two halves of a screenshot gave a shift of +104 px (the
   right-eye image moved right, a right eye should see it move left). Fix: the camera's sideways axis is (-sin h, cos h).
+
+## Calibration result (NDVR_CALIB, 2560x1440, zoom 0.5)
+
+Measured by rendering the scene turned, tilted and shifted and matching the vertices (hundreds per test, consistent across runs):
+
+- **Projection:** square pixels; focal length 479.5 px at zoom 0.5, so 959 px at zoom 1 = canvas height / 1.5. That is
+  90 degrees across a 4:3 frame, widened for wider screens (106.3 x 73.7 degrees at 16:9). The zoom argument of the scene
+  render (a double, 1.0 normally) divides the field of view's tangent, so the engine can render as wide as a headset needs.
+- **Heading:** increasing turns LEFT (counter-clockwise from above). Forward = (cos h, sin h).
+- **Pitch:** increasing looks DOWN.
+- **Sideways:** the camera's right-hand axis is (sin h, -cos h). The earlier "eyes swapped" fix from the side-by-side
+  screenshot was wrong: the halves were cropped from a guessed window position, which faked the shift. Reverted.
+- Bank (roll) direction is not measured yet.

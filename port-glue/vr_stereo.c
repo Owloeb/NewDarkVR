@@ -20,8 +20,9 @@
  *
  * Tuning (environment variables, all optional):
  *   NDVR_UNIT_M      metres per engine unit (default 0.3048, a foot)
- *   NDVR_FOV_H       horizontal field of view in degrees the engine renders with (default 90)
- *   NDVR_FOV_V       vertical field of view in degrees (default: from the canvas aspect ratio)
+ *   NDVR_FOV_H       override the horizontal field of view in degrees the engine is assumed to render with
+ *                    (default: computed from the measured projection, see below)
+ *   NDVR_FOV_V       override the vertical field of view in degrees (default: from the canvas aspect ratio)
  *   NDVR_FLIP_YAW / NDVR_FLIP_PITCH / NDVR_FLIP_ROLL   set to 1 to reverse that axis
  *   NDVR_FLIP_SIDE   set to 1 to reverse sideways head movement (and so swap the eyes)
  *   NDVR_FLIP_Y      set to 0 if the headset image is upside down (default 1)
@@ -179,7 +180,7 @@ int vr_scene_hook(CPU *c) {
         mode = envi("NDVR_VR", 0) ? 2 : envi("NDVR_CALIB", 0) ? 3 : envi("NDVR_STEREO", 0) ? 1 : 0;
         zoom_mul = envd("NDVR_ZOOM", 0);
         const char *i = getenv("NDVR_IPD"); if (i && *i) ipd = (float)atof(i);
-        unit_m = envd("NDVR_UNIT_M", 0.3048); fov_h = envd("NDVR_FOV_H", 90); fov_v = envd("NDVR_FOV_V", 0);
+        unit_m = envd("NDVR_UNIT_M", 0.3048); fov_h = envd("NDVR_FOV_H", 0); fov_v = envd("NDVR_FOV_V", 0);
         flip_yaw = envi("NDVR_FLIP_YAW", 0); flip_pitch = envi("NDVR_FLIP_PITCH", 0); flip_roll = envi("NDVR_FLIP_ROLL", 0); flip_side = envi("NDVR_FLIP_SIDE", 0);
         flip_y = envi("NDVR_FLIP_Y", 1); no_pos = envi("NDVR_NO_POS", 0);
         if (mode || zoom_mul > 0) port_debug("NDVR: %s mode; unit %.4f m, fov_h %.1f, fov_v %.1f, flips yaw %d pitch %d roll %d side %d y %d, no_pos %d, zoom x%.3f",
@@ -251,25 +252,43 @@ int vr_scene_hook(CPU *c) {
     double body_h = (double)RD16(p + 20) * (2.0 * PI_D / 65536.0);
     CPU saved = *c; busy = 1;
     Submit sub; memset(&sub, 0, sizeof sub);
-    double asp = (double)W / (double)H, th = tan(fov_h * PI_D / 360.0), tv = fov_v > 0 ? tan(fov_v * PI_D / 360.0) : th / asp;
+    /* The engine's projection, measured with NDVR_CALIB: square pixels, focal length = canvas height / 1.5 at zoom 1
+     * (90 degrees across a 4:3 frame, widened for wider screens), and the focal length scales with the zoom argument.
+     * In the headset the zoom is chosen so the engine's symmetric frustum covers both eyes' fields of view. */
+    double asp = (double)W / (double)H, zarg = 1.0;
+    { uint64_t b = (uint64_t)RD32(c->esp + 8) << 32 | RD32(c->esp + 4); memcpy(&zarg, &b, 8); if (!(zarg > 0.05 && zarg < 20)) zarg = 0; }
+    if (mode == 2 && zarg > 0 && !(zoom_mul > 0)) {
+        double need = 0;                                          /* largest tan(half angle) the headset shows, in vertical units */
+        for (int e = 0; e < 2; e++) {
+            const ndvr_fov *f = &fr.eye[e].fov; double t[4] = { tan(-f->left) / asp, tan(f->right) / asp, tan(f->up), tan(-f->down) };
+            for (int i = 0; i < 4; i++) if (t[i] > need) need = t[i];
+        }
+        if (need > 0.1) {
+            double z = 0.75 / (need * 1.02); uint64_t b; memcpy(&b, &z, 8);
+            WR32(c->esp + 4, (uint32_t)b); WR32(c->esp + 8, (uint32_t)(b >> 32)); zarg = z;
+        }
+    }
+    double tv = zarg > 0 ? 0.75 / zarg : 0.75, th = tv * asp;
+    if (fov_h > 0) { th = tan(fov_h * PI_D / 360.0); tv = fov_v > 0 ? tan(fov_v * PI_D / 360.0) : th / asp; }
     for (int e = 0; e < 2; e++) {
         *c = saved;
         if (mode == 1) {
-            double s = (e ? 0.5 : -0.5) * ipd;                    /* right-hand direction measured on a real run: (-sin h, cos h) */
-            wrf(p, x - (float)(sin(body_h) * s)); wrf(p + 4, y + (float)(cos(body_h) * s));
+            double s = (e ? 0.5 : -0.5) * ipd;                    /* the camera's right-hand axis is (sin h, -cos h) (NDVR_CALIB) */
+            wrf(p, x + (float)(sin(body_h) * s)); wrf(p + 4, y - (float)(cos(body_h) * s));
         } else {
             const ndvr_pose *ep = &fr.eye[e].pose;
             HeadAngles ha = head_angles(ep->orientation);
             double yaw_rel = wrap_pi(ha.yaw - ref_yaw);
-            double heading = body_h + (flip_yaw ? -1.0 : 1.0) * yaw_rel;     /* verified in the headset: engine heading grows turning left, like head yaw */
-            double pitch = (flip_pitch ? -1.0 : 1.0) * ha.pitch;             /* verified in the headset: positive engine pitch looks up */
+            double heading = body_h + (flip_yaw ? -1.0 : 1.0) * yaw_rel;     /* measured: engine heading grows turning left, like head yaw */
+            double pitch = (flip_pitch ? 1.0 : -1.0) * ha.pitch;             /* measured (NDVR_CALIB): positive engine pitch looks down */
             double bank = (flip_roll ? -1.0 : 1.0) * ha.roll;
             V3 d = v3(ep->position.x - ref_pos.x, ep->position.y - ref_pos.y, ep->position.z - ref_pos.z);
             if (no_pos) d = v3(0, 0, 0);
             V3 fr_ref = v3(-sin(ref_yaw), 0, -cos(ref_yaw)), rr_ref = v3(cos(ref_yaw), 0, -sin(ref_yaw));
             double along_f = dot(d, fr_ref), along_r = (flip_side ? -1.0 : 1.0) * dot(d, rr_ref), along_u = d.y;
             double k = 1.0 / unit_m;
-            double ex = (cos(body_h) * along_f - sin(body_h) * along_r) * k, ey = (sin(body_h) * along_f + cos(body_h) * along_r) * k;
+            /* forward (cos h, sin h), right (sin h, -cos h): both measured with NDVR_CALIB */
+            double ex = (cos(body_h) * along_f + sin(body_h) * along_r) * k, ey = (sin(body_h) * along_f - cos(body_h) * along_r) * k;
             wrf(p, x + (float)ex); wrf(p + 4, y + (float)ey); wrf(p + 8, z + (float)(along_u * k));
             WR16(p + 16, ang16(bank)); WR16(p + 18, ang16(pitch)); WR16(p + 20, ang16(heading));
             sub.pose[e] = *ep;
