@@ -12,10 +12,10 @@ index ba13283..f90af07 100644
 +int fp_00601430(CPU *c) { return vr_scene_hook(c); }
 diff --git a/port/core/vr_stereo.c b/port/core/vr_stereo.c
 new file mode 100644
-index 0000000..2f416fe
+index 0000000..14582ef
 --- /dev/null
 +++ b/port/core/vr_stereo.c
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,71 @@
 +/* NewDarkVR M3b: stereo preview. Part of the NewDarkVR patch set (github.com/Owloeb/NewDarkVR), not vanilla.
 + *
 + * The engine transforms and projects the world itself and hands the Direct3D layer screen-space vertices, so there is no
@@ -65,7 +65,9 @@ index 0000000..2f416fe
 +    uint32_t p = c->eax;
 +    float x = rdf(p), y = rdf(p + 4);
 +    double h = (double)RD16(p + 20) * (6.283185307179586 / 65536.0);          /* heading 0 = +x, counter-clockwise, 65536 = 360 deg */
-+    float rx = (float)sin(h), ry = (float)-cos(h);                             /* the camera's right-hand direction */
++    /* measured on a real run: the engine's right-hand direction is (-sin h, cos h), so heading counts clockwise as seen from above
++       for the sideways axis even though forward is (cos h, sin h) */
++    float rx = (float)-sin(h), ry = (float)cos(h);
 +    uint8_t keep[32]; memcpy(keep, GP(CAM_COPY), sizeof keep);
 +    CPU saved = *c; busy = 1;
 +    for (int e = 0; e < 2; e++) {

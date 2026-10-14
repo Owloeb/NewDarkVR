@@ -76,3 +76,12 @@ From a real play session (`patches/m3a-camera-probe.patch`):
 - z sat near 7.0 to 7.7 while standing, which suggests one engine unit is about a foot (to confirm).
 - The function also takes stack arguments (a double, 1.0). The recompiled code ignores return addresses, so a hook can call
   the lifted function itself and then restore the CPU state, without knowing the argument count.
+
+## M3b result: two scene renders per frame work
+
+First run of the stereo preview (`patches/m3b-stereo-preview.patch`, a real level, 2560x1440, RTX 4070 Super):
+
+- Both eye renders came out correct and complete. Nothing doubled, flickered or went missing in the world view.
+- CPU time for the two scene renders: 2.4 to 7.2 ms per frame (about 5 ms typical, up to 374 draws per frame). The base game ran at about 97 fps, so VR's 90 fps budget fits.
+- The first build had the eyes swapped. Cross-correlating the two halves of a screenshot gave a shift of +104 px (the
+  right-eye image moved right, a right eye should see it move left). Fix: the camera's sideways axis is (-sin h, cos h).
