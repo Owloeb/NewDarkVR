@@ -13,11 +13,22 @@
  *                   field of view) and the true direction of heading, pitch and the sideways axis. Logs NDVR CALIB lines.
  *   NDVR_ZOOM=f     multiplies the zoom the engine passes to the scene render (1.0 normally); works in every mode
  *
- * Headset camera. The engine's own heading (mouse look, later thumbstick) is the body. The head turns relative to
- * it: engine heading = body heading + head yaw since the last recentre; pitch and roll come from the head; eye
- * position = engine eye position + the head's physical movement since the recentre, turned by the body heading.
- * Recentre: automatic on the first frame and whenever the headset goes on (session focus gained), and with the left
- * controller's menu button.
+ * Headset camera. The body's facing is our own (it starts as the engine's heading and changes with snap turn); the
+ * head turns relative to it: camera heading = body facing + head yaw since the last recentre; pitch and roll come
+ * from the head; eye position = engine eye position + the head's physical movement since the recentre, turned by the
+ * body facing. Recentre: automatic on the first frame and whenever the headset goes on (session focus gained), and
+ * with the left controller's menu button.
+ *
+ * Gun hand (NDVR_HAND=left or right, default right). The engine's own mouse look follows where it points: every
+ * frame the difference between the engine's heading/pitch and the hand's aim is sent as mouse motion (32 heading /
+ * 48 pitch units per count, measured; 2 frames in flight are accounted for), so shots, the muzzle flash and the gun
+ * all aim with the controller. Walking with the keyboard is relative to that aim for now. Controls on that hand:
+ *   trigger = left mouse button (fire; click in the inventory and menus), A / X = right mouse button,
+ *   B / Y = Tab (inventory / cursor mode), thumbstick left/right = snap turn.
+ * HUD panel. The game draws its HUD into a texture of its own and pastes it over the 3D view; in the headset that
+ * texture is a panel in front of you (placed at each recentre, below eye level, tilted towards you). Menus and videos
+ * (no 3D view) show the whole screen on the same panel. When the game shows a cursor (inventory, menus) the gun hand
+ * points at the panel: a pointer dot shows where, and the game's cursor follows.
  *
  * Tuning (environment variables, all optional):
  *   NDVR_UNIT_M      metres per engine unit (default 0.3048, a foot)
@@ -29,6 +40,12 @@
  *   NDVR_FLIP_Y      set to 0 if the headset image is upside down (default 1)
  *   NDVR_NO_POS      set to 1 to ignore the head's physical movement (rotation only)
  *   NDVR_RES         eye resolution relative to the headset's recommended size (default 1.0, 0.25..2.0)
+ *   NDVR_HAND        left or right: the gun hand (default right)
+ *   NDVR_AIM         0 to keep aiming with the mouse
+ *   NDVR_AIM_UNITS_H / NDVR_AIM_UNITS_V   engine units per mouse count (default 32 / 48, the game's default sensitivity)
+ *   NDVR_SNAP        snap turn in degrees (default 30)
+ *   NDVR_PANEL_W / NDVR_PANEL_DIST / NDVR_PANEL_DROP   HUD panel width, distance and height below the eyes, in metres
+ *                    (default 1.1 / 1.0 / 0.30)
  * Run with SS2PORT_NOVSYNC=1 so the desktop window does not pace the headset. */
 #ifdef _WIN32
 #include <stdio.h>
@@ -84,6 +101,20 @@ static double zoom_mul = 0; static int zoom_warned;
 static int xr_state;                                              /* 0 not tried, 1 running, -1 failed */
 static ndvr_frame fr; static int fr_ok;
 static int ref_valid, was_focused; static double ref_yaw; static V3 ref_pos; static uint32_t prev_btn;
+static void init_env(void);
+/* controls (see the header) */
+static int hand_dom = 1, aim_on = 1; static double aim_uh = 32, aim_uv = 48, snap_deg = 30, panel_dist = 1.0, panel_drop = 0.30, panel_w = 1.1;
+static double body_yaw; static int body_valid, snap_armed = 1;   /* the body's facing in the game: snap turn; the engine's own heading follows the gun */
+static int pend_h[2], pend_v[2];                                  /* aim: heading / pitch units sent as mouse motion in the last two frames */
+static ndvr_pose panel_pose; static int panel_valid;
+static int eng_h, eng_p;                                          /* the engine camera's heading and pitch at the last scene render */
+static double ptr_u = -1, ptr_v = -1;
+static int frame_state;                                           /* 0: no headset frame yet this game frame, 1: begun by the scene render, 2: already closed */
+static int ptr_gx = -1, ptr_gy = -1; static uint32_t btn_was[2]; static int trig_was;
+extern PlatTexture *vr_hud_tex; extern int vr_hud_w, vr_hud_h, vr_hud_seen;   /* port/dx/d3d9.c */
+extern unsigned vr_gl_bb_fbo(int *w, int *h);                     /* port/backends/sdl2/gl_render.c */
+extern int vr_input_captured(void), vr_input_mouse_motion(int dx, int dy), vr_input_mouse_abs(int x, int y);   /* port/win32/user32.c */
+extern void vr_input_mouse_button(int button, int down), vr_input_key(int dik, int down);
 
 static void xr_log(const char *line) { port_debug("NDVR: %s", line); }
 static void rt_init(void *a) {
@@ -93,7 +124,8 @@ static void rt_init(void *a) {
 }
 static void rt_begin(void *a) { (void)a; fr_ok = ndvr_begin_frame(&fr); }
 
-typedef struct { ndvr_pose pose[2]; ndvr_fov fov[2]; int w[2], h[2]; int mirror; PlatTexture *tex[2]; int flip; int rendered; } Submit;
+typedef struct { ndvr_pose pose[2]; ndvr_fov fov[2]; int w[2], h[2]; int mirror; PlatTexture *tex[2]; int flip; int rendered;
+                 int panel; PlatTexture *ptex; ndvr_pose ppose; float pw, ph; int cx, cy; } Submit;   /* panel: 0 none, 1 HUD texture, 2 back buffer */
 static void rt_submit(void *data, PlatDrawFn draw) {
     Submit *s = data; (void)draw;
     if (s->rendered) {
@@ -102,6 +134,10 @@ static void rt_submit(void *data, PlatDrawFn draw) {
             ndvr_blit_eye(e, fbo, w, h, s->flip);
         }
         ndvr_set_submit_views(s->pose, s->fov);
+    }
+    if (s->panel) {
+        int w, h; unsigned fbo = s->panel == 1 ? vr_gl_tex_fbo(s->ptex, &w, &h) : vr_gl_bb_fbo(&w, &h);
+        ndvr_panel_submit(fbo, w, h, s->flip, s->panel == 2, &s->ppose, s->pw, s->ph, s->cx, s->cy);
     }
     ndvr_end_frame();
 }
@@ -116,6 +152,139 @@ static HeadAngles head_angles(ndvr_quat q) {
     return a;
 }
 
+
+static void init_env(void) {
+    mode = envi("NDVR_VR", 0) ? 2 : envi("NDVR_CALIB", 0) ? 3 : envi("NDVR_STEREO", 0) ? 1 : 0;
+    zoom_mul = envd("NDVR_ZOOM", 0);
+    const char *i = getenv("NDVR_IPD"); if (i && *i) ipd = (float)atof(i);
+    unit_m = envd("NDVR_UNIT_M", 0.3048); fov_h = envd("NDVR_FOV_H", 0); fov_v = envd("NDVR_FOV_V", 0);
+    flip_yaw = envi("NDVR_FLIP_YAW", 0); flip_pitch = envi("NDVR_FLIP_PITCH", 0); flip_roll = envi("NDVR_FLIP_ROLL", 0); flip_side = envi("NDVR_FLIP_SIDE", 0);
+    flip_y = envi("NDVR_FLIP_Y", 1); res_scale = envd("NDVR_RES", 1.0); if (res_scale < 0.25) res_scale = 0.25; if (res_scale > 2.0) res_scale = 2.0; no_pos = envi("NDVR_NO_POS", 0);
+    if (mode || zoom_mul > 0) port_debug("NDVR: %s mode; unit %.4f m, fov_h %.1f, fov_v %.1f, flips yaw %d pitch %d roll %d side %d y %d, no_pos %d, zoom x%.3f",
+        mode == 2 ? "headset" : mode == 3 ? "calibration" : mode == 1 ? "side-by-side preview" : "normal", unit_m, fov_h, fov_v, flip_yaw, flip_pitch, flip_roll, flip_side, flip_y, no_pos, zoom_mul > 0 ? zoom_mul : 1.0);
+    hand_dom = 1; { const char *h = getenv("NDVR_HAND"); if (h && (*h == 'l' || *h == 'L')) hand_dom = 0; }
+    aim_on = envi("NDVR_AIM", 1); aim_uh = envd("NDVR_AIM_UNITS_H", 32); aim_uv = envd("NDVR_AIM_UNITS_V", 48);
+    snap_deg = envd("NDVR_SNAP", 30); panel_dist = envd("NDVR_PANEL_DIST", 1.0); panel_drop = envd("NDVR_PANEL_DROP", 0.30); panel_w = envd("NDVR_PANEL_W", 1.1);
+    if (mode == 2) port_debug("NDVR: %s hand, aim %s (%.0f / %.0f units per count), snap turn %.0f deg, panel %.2f m wide at %.2f m, %.2f m below the eyes",
+        hand_dom ? "right" : "left", aim_on ? "on" : "off", aim_uh, aim_uv, snap_deg, panel_w, panel_dist, panel_drop);
+}
+
+/* ---------------------------------------------------------------- recentre, snap turn, the HUD panel's place */
+static ndvr_quat qmul(ndvr_quat a, ndvr_quat b) {
+    ndvr_quat r = { a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                    a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z };
+    return r;
+}
+static void place_panel(void) {                                   /* in front of the recentred head, below eye level, tilted to face it */
+    double tilt = -atan2(panel_drop, panel_dist);
+    ndvr_quat qy = { 0, (float)sin(ref_yaw / 2), 0, (float)cos(ref_yaw / 2) }, qx = { (float)sin(tilt / 2), 0, 0, (float)cos(tilt / 2) };
+    panel_pose.orientation = qmul(qy, qx);
+    panel_pose.position.x = (float)(ref_pos.x - sin(ref_yaw) * panel_dist);
+    panel_pose.position.y = (float)(ref_pos.y - panel_drop);
+    panel_pose.position.z = (float)(ref_pos.z - cos(ref_yaw) * panel_dist);
+    panel_pose.flags = NDVR_POSE_ORIENT_VALID | NDVR_POSE_POS_VALID; panel_valid = 1;
+}
+static void track_update(void) {
+    int focused = ndvr_focused();                                 /* recentre when the headset goes on (focus gained), on the */
+    if (!ref_valid || (focused && !was_focused) ||                /* first frame, and with the left controller's menu button */
+        ((fr.hand[0].buttons & NDVR_BTN_MENU) && !(prev_btn & NDVR_BTN_MENU))) {
+        HeadAngles ha = head_angles(fr.head.orientation);
+        ref_yaw = ha.yaw; ref_pos = v3(fr.head.position.x, fr.head.position.y, fr.head.position.z); ref_valid = 1;
+        place_panel();
+    }
+    prev_btn = fr.hand[0].buttons;
+    was_focused = focused;
+    float sx = fr.hand[hand_dom].stick_x;                         /* snap turn on the gun hand's thumbstick */
+    if (snap_armed && fabsf(sx) > 0.75f && body_valid) { body_yaw += (sx > 0 ? -1.0 : 1.0) * snap_deg * PI_D / 180.0; snap_armed = 0; }
+    else if (fabsf(sx) < 0.3f) snap_armed = 1;
+}
+
+/* ---------------------------------------------------------------- the gun hand: aim through mouse look, or a pointer on the panel */
+static int s16i(int v) { v &= 0xFFFF; return v > 32767 ? v - 65536 : v; }
+static void aim_update(const ndvr_hand *hd) {
+    V3 f = qrot(hd->aim.orientation, v3(0, 0, -1));
+    double ya = atan2(-f.x, -f.z), pa = asin(f.y < -1 ? -1 : f.y > 1 ? 1 : f.y);
+    double th = body_yaw + wrap_pi(ya - ref_yaw), tp = -pa;      /* engine: heading grows to the left, positive pitch looks down */
+    int eh = s16i((int)ang16(th) - eng_h - pend_h[0] - pend_h[1]);   /* what is still missing once the motion in flight lands (2 frames) */
+    int ep = s16i((int)ang16(tp) - eng_p - pend_v[0] - pend_v[1]);
+    int dx = (int)lround(-eh / aim_uh), dy = (int)lround(ep / aim_uv);   /* mouse left (dx < 0) turns left, mouse up (dy < 0) looks up */
+    if (dx > 600) dx = 600; if (dx < -600) dx = -600; if (dy > 600) dy = 600; if (dy < -600) dy = -600;
+    if ((dx || dy) && !vr_input_mouse_motion(dx, dy)) dx = dy = 0;
+    pend_h[1] = pend_h[0]; pend_h[0] = (int)lround(-dx * aim_uh);
+    pend_v[1] = pend_v[0]; pend_v[0] = (int)lround(dy * aim_uv);
+}
+static int panel_hit(const ndvr_hand *hd, double pw, double ph, double *u, double *v) {
+    if (!panel_valid || !(hd->aim.flags & NDVR_POSE_POS_VALID)) return 0;
+    V3 o = v3(hd->aim.position.x, hd->aim.position.y, hd->aim.position.z), d = qrot(hd->aim.orientation, v3(0, 0, -1));
+    V3 P = v3(panel_pose.position.x, panel_pose.position.y, panel_pose.position.z);
+    V3 n = qrot(panel_pose.orientation, v3(0, 0, 1)), ux = qrot(panel_pose.orientation, v3(1, 0, 0)), uy = qrot(panel_pose.orientation, v3(0, 1, 0));
+    double dn = dot(d, n); if (fabs(dn) < 1e-6) return 0;
+    double t = dot(v3(P.x - o.x, P.y - o.y, P.z - o.z), n) / dn; if (t <= 0) return 0;
+    V3 h = v3(o.x + d.x * t - P.x, o.y + d.y * t - P.y, o.z + d.z * t - P.z);
+    *u = dot(h, ux) / pw + 0.5; *v = 0.5 - dot(h, uy) / ph;
+    return *u >= 0 && *u <= 1 && *v >= 0 && *v <= 1;
+}
+static void controls(int in_game, double pw, double ph) {
+    const ndvr_hand *hd = &fr.hand[hand_dom];
+    int captured = vr_input_captured();
+    ptr_u = ptr_v = -1;
+    if (!hd->active) {                                            /* controller lost or headset off: let go of anything held */
+        if (trig_was) { vr_input_mouse_button(0, 0); trig_was = 0; }
+        if (btn_was[hand_dom] & NDVR_BTN_PRIMARY) vr_input_mouse_button(1, 0);
+        if (btn_was[hand_dom] & NDVR_BTN_SECONDARY) vr_input_key(0x0F, 0);
+        btn_was[hand_dom] = 0; pend_h[0] = pend_h[1] = pend_v[0] = pend_v[1] = 0;
+        return;
+    }
+    if (captured) {                                               /* mouse look: the game aims where the gun hand points */
+        if (in_game && aim_on && body_valid && (hd->aim.flags & NDVR_POSE_ORIENT_VALID)) aim_update(hd);
+    } else {                                                      /* a cursor on screen (inventory, menus): point at the panel */
+        pend_h[0] = pend_h[1] = pend_v[0] = pend_v[1] = 0;
+        double u, v; int W, H; plat_video_window_size(&W, &H);
+        if (W > 0 && H > 0 && panel_hit(hd, pw, ph, &u, &v)) {
+            ptr_u = u; ptr_v = v;
+            int gx = (int)(u * W), gy = (int)(v * H); if (gx >= W) gx = W - 1; if (gy >= H) gy = H - 1;
+            if (gx != ptr_gx || gy != ptr_gy) { vr_input_mouse_abs(gx, gy); ptr_gx = gx; ptr_gy = gy; }
+        }
+    }
+    /* buttons on the gun hand: trigger = left mouse button (fire / click), A or X = right mouse button, B or Y = Tab (inventory) */
+    int trig = hd->trigger > 0.6f ? 1 : hd->trigger < 0.4f ? 0 : trig_was;
+    if (trig != trig_was) { vr_input_mouse_button(0, trig); trig_was = trig; }
+    uint32_t b = hd->buttons, chg = b ^ btn_was[hand_dom];
+    if (chg & NDVR_BTN_PRIMARY) vr_input_mouse_button(1, (b & NDVR_BTN_PRIMARY) != 0);
+    if (chg & NDVR_BTN_SECONDARY) vr_input_key(0x0F, (b & NDVR_BTN_SECONDARY) != 0);
+    btn_was[hand_dom] = b;
+}
+
+/* ---------------------------------------------------------------- end of a game frame (called from Present) */
+static Submit pending_sub;
+void vr_frame_present(void) {
+    if (mode < 0) init_env();
+    if (mode != 2) return;
+    if (xr_state == 0) glt_call(rt_init, NULL);
+    if (xr_state < 0) { mode = 0; return; }
+    int st = frame_state; frame_state = 0;
+    int hud = vr_hud_seen; vr_hud_seen = 0;
+    if (st == 2) return;                                          /* the scene render already closed this headset frame */
+    Submit s;
+    if (st == 1) s = pending_sub;
+    else {                                                        /* no 3D view this frame (menus, videos): the panel alone */
+        memset(&s, 0, sizeof s); s.flip = flip_y;
+        glt_call(rt_begin, NULL);
+        if (!(fr_ok && fr.should_render && (fr.head.flags & NDVR_POSE_ORIENT_VALID))) { plat_gfx_deferred(rt_submit, &s, sizeof s); return; }
+        track_update();
+    }
+    int W, H; plat_video_window_size(&W, &H);
+    int src_w = 0, src_h = 0;
+    if (st == 1 && hud && vr_hud_tex && vr_hud_w > 0) { s.panel = 1; s.ptex = vr_hud_tex; src_w = vr_hud_w; src_h = vr_hud_h; }
+    else if (st != 1 && W > 0 && H > 0) { s.panel = 2; src_w = W; src_h = H; }
+    double pw = panel_w, ph = src_w > 0 ? panel_w * src_h / src_w : panel_w * 9.0 / 16.0;
+    controls(st == 1, pw, ph);
+    if (s.panel && panel_valid) {
+        s.ppose = panel_pose; s.pw = (float)pw; s.ph = (float)ph;
+        s.cx = ptr_u >= 0 ? (int)(ptr_u * src_w) : -1; s.cy = ptr_v >= 0 ? (int)(ptr_v * src_h) : -1;
+    } else s.panel = 0;
+    plat_gfx_deferred(rt_submit, &s, sizeof s);
+}
 
 /* ---------------------------------------------------------------- calibration (NDVR_CALIB=1) */
 #define CAP_MAX (3 * 400000)
@@ -180,16 +349,7 @@ static void calib_report(int W, int H, double delta_deg, double side_units, doub
 
 int vr_scene_hook(CPU *c) {
     if (busy) return 0;                                           /* our own nested call: let the original run */
-    if (mode < 0) {
-        mode = envi("NDVR_VR", 0) ? 2 : envi("NDVR_CALIB", 0) ? 3 : envi("NDVR_STEREO", 0) ? 1 : 0;
-        zoom_mul = envd("NDVR_ZOOM", 0);
-        const char *i = getenv("NDVR_IPD"); if (i && *i) ipd = (float)atof(i);
-        unit_m = envd("NDVR_UNIT_M", 0.3048); fov_h = envd("NDVR_FOV_H", 0); fov_v = envd("NDVR_FOV_V", 0);
-        flip_yaw = envi("NDVR_FLIP_YAW", 0); flip_pitch = envi("NDVR_FLIP_PITCH", 0); flip_roll = envi("NDVR_FLIP_ROLL", 0); flip_side = envi("NDVR_FLIP_SIDE", 0);
-        flip_y = envi("NDVR_FLIP_Y", 1); res_scale = envd("NDVR_RES", 1.0); if (res_scale < 0.25) res_scale = 0.25; if (res_scale > 2.0) res_scale = 2.0; no_pos = envi("NDVR_NO_POS", 0);
-        if (mode || zoom_mul > 0) port_debug("NDVR: %s mode; unit %.4f m, fov_h %.1f, fov_v %.1f, flips yaw %d pitch %d roll %d side %d y %d, no_pos %d, zoom x%.3f",
-            mode == 2 ? "headset" : mode == 3 ? "calibration" : mode == 1 ? "side-by-side preview" : "normal", unit_m, fov_h, fov_v, flip_yaw, flip_pitch, flip_roll, flip_side, flip_y, no_pos, zoom_mul > 0 ? zoom_mul : 1.0);
-    }
+    if (mode < 0) init_env();
     if (zoom_mul > 0) {                                           /* scale the engine's zoom argument (a double at [esp+4]) */
         double z; uint32_t lo = RD32(c->esp + 4), hi = RD32(c->esp + 8); uint64_t b = (uint64_t)hi << 32 | lo; memcpy(&z, &b, 8);
         if (z > 0.05 && z < 20) { z *= zoom_mul; memcpy(&b, &z, 8); WR32(c->esp + 4, (uint32_t)b); WR32(c->esp + 8, (uint32_t)(b >> 32)); }
@@ -236,20 +396,18 @@ int vr_scene_hook(CPU *c) {
     clock_t t0 = clock();
     int vr = 0;
     if (mode == 2) {
+        if (frame_state) return 0;                                /* a second scene render in one frame: the engine draws it normally */
         glt_call(rt_begin, NULL);                                 /* waits for the headset's frame timing, polls tracking */
+        frame_state = 2;
         vr = fr_ok && fr.should_render && (fr.head.flags & NDVR_POSE_ORIENT_VALID);
         if (!vr) {                                                /* nothing to draw this frame: close it and let the engine render normally */
             Submit s; memset(&s, 0, sizeof s); plat_gfx_deferred(rt_submit, &s, sizeof s);
             return 0;
         }
-        int focused = ndvr_focused();                             /* recentre when the headset goes on (focus gained), on the */
-        if (!ref_valid || (focused && !was_focused) ||            /* first frame, and with the left controller's menu button */
-            ((fr.hand[0].buttons & NDVR_BTN_MENU) && !(prev_btn & NDVR_BTN_MENU))) {
-            HeadAngles ha = head_angles(fr.head.orientation);
-            ref_yaw = ha.yaw; ref_pos = v3(fr.head.position.x, fr.head.position.y, fr.head.position.z); ref_valid = 1;
-        }
-        prev_btn = fr.hand[0].buttons;
-        was_focused = focused;
+        frame_state = 1;
+        if (!body_valid) { body_yaw = (double)RD16(c->eax + 20) * (2.0 * PI_D / 65536.0); body_valid = 1; }
+        eng_h = RD16(c->eax + 20); eng_p = RD16(c->eax + 18);    /* the engine's own aim this frame (mouse look) */
+        track_update();
     }
 
     uint32_t p = c->eax;
@@ -286,7 +444,7 @@ int vr_scene_hook(CPU *c) {
             const ndvr_pose *ep = &fr.eye[e].pose;
             HeadAngles ha = head_angles(ep->orientation);
             double yaw_rel = wrap_pi(ha.yaw - ref_yaw);
-            double heading = body_h + (flip_yaw ? -1.0 : 1.0) * yaw_rel;     /* measured: engine heading grows turning left, like head yaw */
+            double heading = body_yaw + (flip_yaw ? -1.0 : 1.0) * yaw_rel;   /* measured: engine heading grows turning left, like head yaw */
             double pitch = (flip_pitch ? 1.0 : -1.0) * ha.pitch;             /* measured (NDVR_CALIB): positive engine pitch looks down */
             double bank = (flip_roll ? -1.0 : 1.0) * ha.roll;
             V3 d = v3(ep->position.x - ref_pos.x, ep->position.y - ref_pos.y, ep->position.z - ref_pos.z);
@@ -295,7 +453,7 @@ int vr_scene_hook(CPU *c) {
             double along_f = dot(d, fr_ref), along_r = (flip_side ? -1.0 : 1.0) * dot(d, rr_ref), along_u = d.y;
             double k = 1.0 / unit_m;
             /* forward (cos h, sin h), right (sin h, -cos h): both measured with NDVR_CALIB */
-            double ex = (cos(body_h) * along_f + sin(body_h) * along_r) * k, ey = (sin(body_h) * along_f - cos(body_h) * along_r) * k;
+            double ex = (cos(body_yaw) * along_f + sin(body_yaw) * along_r) * k, ey = (sin(body_yaw) * along_f - cos(body_yaw) * along_r) * k;
             wrf(p, x + (float)ex); wrf(p + 4, y + (float)ey); wrf(p + 8, z + (float)(along_u * k));
             WR16(p + 16, ang16(bank)); WR16(p + 18, ang16(pitch)); WR16(p + 20, ang16(heading));
             sub.pose[e] = *ep;
@@ -324,7 +482,8 @@ int vr_scene_hook(CPU *c) {
     busy = 0;                                                      /* c is now as the original leaves it after returning */
     vr_d3d_view_map(0, 0, 0, 1, 1);
     memcpy(GP(p), keep_cam, sizeof keep_cam);
-    memcpy(GP(CAM_COPY), keep_copy, sizeof keep_copy);             /* everything else sees the engine's own camera */
+    memcpy(GP(CAM_COPY), keep_copy, sizeof keep_copy);             /* everything else sees the engine's own camera, */
+    if (mode == 2) memcpy(GP(CAM_COPY), keep_cam, 24);            /* as the original would have left it (sound, culling, the aim below) */
     vr_d3d_restore();
     if (mode == 1) {
         plat_gfx_copy(eye_tex[0], 0, 0, W, H, NULL, 0, 0, W / 2, H, 1);
@@ -334,7 +493,7 @@ int vr_scene_hook(CPU *c) {
           plat_gfx_clear(1, 0xFF000000u, 0, 1.0f, 0, 0);
           plat_gfx_copy(hmd_tex[0], 0, 0, hmd_w[0], hmd_h[0], NULL, (W - mw) / 2, (H - mh) / 2, mw, mh, 1); }   /* the desktop window mirrors the left eye */
         sub.rendered = 1; sub.tex[0] = hmd_tex[0]; sub.tex[1] = hmd_tex[1]; sub.flip = flip_y;
-        plat_gfx_deferred(rt_submit, &sub, sizeof sub);
+        pending_sub = sub;                                        /* submitted at Present, with this frame's HUD (vr_frame_present) */
     }
     acc += clock() - t0;
     if (++frames % 120 == 0) { port_debug("NDVR: scene renders + headset sync took %.2f ms per frame (CPU side), camera %.2f %.2f %.2f heading %u", 1000.0 * acc / CLOCKS_PER_SEC / 120, x, y, z, (unsigned)RD16(p + 20)); acc = 0; }
@@ -343,4 +502,5 @@ int vr_scene_hook(CPU *c) {
 #else
 #include "core.h"
 int vr_scene_hook(CPU *c) { (void)c; return 0; }
+void vr_frame_present(void) {}
 #endif

@@ -34,15 +34,17 @@ separation) into two render textures, and shows them side by side in the window.
 ## vr-port-hooks.patch (headset build, supersedes m3a and m3b)
 
 Applied together with the NewDarkVR files by `tools/install_into_port.py <NewDarkRecompiled checkout>`; do not apply it by hand.
-Adds the forwarder in `port/core/fastpaths.c`, `vr_d3d_*` in `port/dx/d3d9.c`, `vr_gl_tex_fbo` in
-`port/backends/sdl2/gl_render.c` and the Windows link libraries in `port/CMakeLists.txt`. The sources it needs
+Adds the forwarder in `port/core/fastpaths.c`; `vr_d3d_*`, the HUD texture capture (`vr_hud_*`) and a call to
+`vr_frame_present` at Present in `port/dx/d3d9.c`; `vr_gl_tex_fbo` / `vr_gl_bb_fbo` in `port/backends/sdl2/gl_render.c`;
+controller-as-mouse input (`vr_input_*`: relative and absolute motion, buttons, keys, capture state) in
+`port/win32/user32.c`; and the Windows link libraries in `port/CMakeLists.txt`. The sources it needs
 (`port-glue/vr_stereo.c`, `src/ndvr_xr.c`, `include/ndvr.h`, the OpenXR headers) are copied into `port/core/`.
 
 ## m5-hud-weapon-probe.patch (probe, on top of vr-port-hooks.patch)
 
 Applied by `tools/install_into_port.py <checkout> --probe` together with `port-glue/vr_probe.c` and `vr_probe.h`. Measurement
 only, off unless `NDVR_PROBE=1`. Adds draw/clear/BeginScene/EndScene/Present calls in `port/dx/d3d9.c` and log-only entry
-hooks in `port/core/fastpaths.c` (plus a heap-arena accessor in `port/core/heap.c` and `vr_input_mouse_motion` in `port/win32/user32.c`) for `render_frame_world`, `d3d_display_set_overlay`, `d3d_display_end_overlay`,
+hooks in `port/core/fastpaths.c` (plus a heap-arena accessor in `port/core/heap.c`; the mouse injection it uses comes with vr-port-hooks.patch) for `render_frame_world`, `d3d_display_set_overlay`, `d3d_display_end_overlay`,
 `d3d_display_end_frame`, `d3d_display_flip` and `cmd_fire_weapon` (all return 0, so the original always runs). It answers:
 which draws are the HUD, which are the held weapon, and where the engine keeps the facing a shot is aimed with. Run it
 without `NDVR_VR`/`NDVR_STEREO`. Details and the optional `NDVR_AIMTEST_*` experiment: header of `port-glue/vr_probe.c`.

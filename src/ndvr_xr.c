@@ -211,9 +211,10 @@ static XrPath g_handPath[2];
 static XrAction g_aGrip, g_aAim, g_aTrigger, g_aSqueeze, g_aStick, g_aStickClick, g_aPrimary,
     g_aSecondary, g_aMenu;
 static XrSpace g_gripSpace[2], g_aimSpace[2];
+static void destroyPanel(void);
 
 /* per-frame */
-static int g_frameBegun, g_framRendered;
+static int g_frameBegun, g_framRendered, g_eyesWritten;
 static XrTime g_frameTime;
 static XrView g_views[2];
 static GLint g_prevFbo;
@@ -737,6 +738,7 @@ void ndvr_shutdown(void)
         if (g_aimSpace[h]) fn.xrDestroySpace(g_aimSpace[h]);
         destroyEye(&g_eye[h]);
     }
+    destroyPanel();
     if (g_set) fn.xrDestroyActionSet(g_set);
     if (g_view) fn.xrDestroySpace(g_view);
     if (g_local) fn.xrDestroySpace(g_local);
@@ -889,7 +891,7 @@ int ndvr_begin_frame(ndvr_frame *out)
     uint32_t vc = 0, e;
 
     memset(out, 0, sizeof *out);
-    g_frameBegun = g_framRendered = g_boundThisFrame = 0;
+    g_frameBegun = g_framRendered = g_boundThisFrame = g_eyesWritten = 0;
     if (!g_inited)
         return 0;
 
@@ -975,6 +977,7 @@ void ndvr_blit_eye(int eye, uint32_t src_fbo, int src_w, int src_h, int flip_y)
     GLint prevRead = 0, prevDraw = 0;
     if (eye < 0 || eye > 1 || !g_framRendered)
         return;
+    g_eyesWritten = 1;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
     gl.bindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
@@ -987,12 +990,147 @@ void ndvr_blit_eye(int eye, uint32_t src_fbo, int src_w, int src_h, int flip_y)
     gl.bindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevDraw);
 }
 
+/* ------------------------------------------------------------------------- */
+/* panel (quad layer)                                                         */
+/* ------------------------------------------------------------------------- */
+
+static struct {
+    XrSwapchain sc;
+    uint32_t w, h, nimg, acquired;
+    GLuint *tex, *fbo;
+    int used;                  /* submitted this frame */
+    int opaque;
+    XrPosef pose;
+    float wm, hm;
+} g_panel;
+
+static void destroyPanel(void)
+{
+    if (g_panel.fbo) gl.deleteFramebuffers((GLsizei)g_panel.nimg, g_panel.fbo);
+    if (g_panel.sc) fn.xrDestroySwapchain(g_panel.sc);
+    free(g_panel.tex); free(g_panel.fbo);
+    g_panel.sc = XR_NULL_HANDLE; g_panel.tex = g_panel.fbo = NULL; g_panel.nimg = g_panel.w = g_panel.h = 0;
+}
+
+static int createPanel(uint32_t w, uint32_t h)
+{
+    XrSwapchainCreateInfo ci;
+    XrSwapchainImageOpenGLKHR *imgs;
+    uint32_t i, n = 0;
+    GLint prev = 0;
+
+    destroyPanel();
+    memset(&ci, 0, sizeof ci);
+    ci.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
+    ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    ci.format = (int64_t)g_fmt;
+    ci.sampleCount = 1;
+    ci.width = w;
+    ci.height = h;
+    ci.faceCount = 1;
+    ci.arraySize = 1;
+    ci.mipCount = 1;
+    if (XR_FAILED(fn.xrCreateSwapchain(g_sess, &ci, &g_panel.sc))) {
+        logf_("panel: xrCreateSwapchain %ux%u failed", w, h);
+        g_panel.sc = XR_NULL_HANDLE;
+        return 0;
+    }
+    if (XR_FAILED(fn.xrEnumerateSwapchainImages(g_panel.sc, 0, &n, NULL)) || !n) { destroyPanel(); return 0; }
+    imgs = (XrSwapchainImageOpenGLKHR *)calloc(n, sizeof *imgs);
+    for (i = 0; i < n; ++i) imgs[i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR;
+    if (XR_FAILED(fn.xrEnumerateSwapchainImages(g_panel.sc, n, &n, (XrSwapchainImageBaseHeader *)imgs))) { free(imgs); destroyPanel(); return 0; }
+    g_panel.nimg = n; g_panel.w = w; g_panel.h = h;
+    g_panel.tex = (GLuint *)calloc(n, sizeof(GLuint));
+    g_panel.fbo = (GLuint *)calloc(n, sizeof(GLuint));
+    for (i = 0; i < n; ++i) g_panel.tex[i] = imgs[i].image;
+    free(imgs);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
+    gl.genFramebuffers((GLsizei)n, g_panel.fbo);
+    for (i = 0; i < n; ++i) {
+        gl.bindFramebuffer(GL_FRAMEBUFFER, g_panel.fbo[i]);
+        gl.framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_panel.tex[i], 0);
+    }
+    gl.bindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev);
+    logf_("panel swapchain %ux%u", w, h);
+    return 1;
+}
+
+static void clearRect(int x, int y, int w, int h, float r, float g, float b)
+{
+    glScissor(x, y, w, h);
+    glClearColor(r, g, b, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+void ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int opaque, const ndvr_pose *pose,
+                       float width_m, float height_m, int cursor_x, int cursor_y)
+{
+    XrSwapchainImageAcquireInfo ai;
+    XrSwapchainImageWaitInfo wait;
+    XrSwapchainImageReleaseInfo ri;
+    GLint prevRead = 0, prevDraw = 0, box[4];
+    GLfloat cc[4];
+    GLboolean sc;
+    int W, H;
+
+    if (!g_framRendered || src_w <= 0 || src_h <= 0 || !pose)
+        return;
+    if (!g_panel.sc || g_panel.w != (uint32_t)src_w || g_panel.h != (uint32_t)src_h)
+        if (!createPanel((uint32_t)src_w, (uint32_t)src_h))
+            return;
+    memset(&ai, 0, sizeof ai);
+    ai.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+    if (XR_FAILED(fn.xrAcquireSwapchainImage(g_panel.sc, &ai, &g_panel.acquired)))
+        return;
+    memset(&wait, 0, sizeof wait);
+    wait.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+    wait.timeout = XR_INFINITE_DURATION;
+    if (XR_FAILED(fn.xrWaitSwapchainImage(g_panel.sc, &wait))) {
+        memset(&ri, 0, sizeof ri); ri.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+        fn.xrReleaseSwapchainImage(g_panel.sc, &ri);
+        return;
+    }
+    W = (int)g_panel.w; H = (int)g_panel.h;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+    glGetIntegerv(GL_SCISSOR_BOX, box);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+    sc = glIsEnabled(GL_SCISSOR_TEST);
+    gl.bindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
+    gl.bindFramebuffer(GL_DRAW_FRAMEBUFFER, g_panel.fbo[g_panel.acquired]);
+    glDisable(GL_SCISSOR_TEST);
+    gl.blitFramebuffer(0, 0, src_w, src_h, 0, flip_y ? H : 0, W, flip_y ? 0 : H, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (cursor_x >= 0 && cursor_y >= 0 && cursor_x < W && cursor_y < H) {
+        int s = H / 90 > 4 ? H / 90 : 4, cy = H - 1 - cursor_y;   /* the image's top row is GL's last row */
+        glEnable(GL_SCISSOR_TEST);
+        clearRect(cursor_x - s - 2, cy - s - 2, 2 * s + 4, 2 * s + 4, 0, 0, 0);
+        clearRect(cursor_x - s, cy - s, 2 * s, 2 * s, 1, 1, 1);
+        clearRect(cursor_x - s / 2, cy - s / 2, s, s, 0.1f, 0.6f, 1.0f);
+    }
+    if (sc) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+    glScissor(box[0], box[1], box[2], box[3]);
+    glClearColor(cc[0], cc[1], cc[2], cc[3]);
+    gl.bindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
+    gl.bindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevDraw);
+    memset(&ri, 0, sizeof ri);
+    ri.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+    fn.xrReleaseSwapchainImage(g_panel.sc, &ri);
+
+    g_panel.pose.orientation.x = pose->orientation.x; g_panel.pose.orientation.y = pose->orientation.y;
+    g_panel.pose.orientation.z = pose->orientation.z; g_panel.pose.orientation.w = pose->orientation.w;
+    g_panel.pose.position.x = pose->position.x; g_panel.pose.position.y = pose->position.y; g_panel.pose.position.z = pose->position.z;
+    g_panel.wm = width_m; g_panel.hm = height_m; g_panel.opaque = opaque; g_panel.used = 1;
+}
+
+
 void ndvr_end_frame(void)
 {
     XrFrameEndInfo ei;
     XrCompositionLayerProjectionView pv[2];
     XrCompositionLayerProjection proj;
-    const XrCompositionLayerBaseHeader *layers[1];
+    XrCompositionLayerQuad quad;
+    const XrCompositionLayerBaseHeader *layers[2];
+    uint32_t nl = 0;
     uint32_t e;
 
     if (!g_frameBegun)
@@ -1039,13 +1177,29 @@ void ndvr_end_frame(void)
         proj.space = g_local;
         proj.viewCount = 2;
         proj.views = pv;
-        layers[0] = (const XrCompositionLayerBaseHeader *)&proj;
-        ei.layerCount = 1;
-        ei.layers = layers;
+        if (g_eyesWritten)                       /* menus: no 3D view this frame, only the panel */
+            layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
+        if (g_panel.used) {
+            memset(&quad, 0, sizeof quad);
+            quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+            quad.layerFlags = g_panel.opaque ? 0 : (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
+            quad.space = g_local;
+            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            quad.subImage.swapchain = g_panel.sc;
+            quad.subImage.imageRect.extent.width = (int32_t)g_panel.w;
+            quad.subImage.imageRect.extent.height = (int32_t)g_panel.h;
+            quad.pose = g_panel.pose;
+            quad.size.width = g_panel.wm;
+            quad.size.height = g_panel.hm;
+            layers[nl++] = (const XrCompositionLayerBaseHeader *)&quad;
+        }
+        ei.layerCount = nl;
+        ei.layers = nl ? layers : NULL;
     }
     fn.xrEndFrame(g_sess, &ei);
-    g_frameBegun = g_framRendered = g_boundThisFrame = 0;
+    g_frameBegun = g_framRendered = g_boundThisFrame = g_eyesWritten = 0;
     g_haveSub = 0;
+    g_panel.used = 0;
 }
 
 void ndvr_bind_eye(const ndvr_eye *eye)
@@ -1056,6 +1210,7 @@ void ndvr_bind_eye(const ndvr_eye *eye)
     }
     gl.bindFramebuffer(GL_FRAMEBUFFER, eye->fbo);
     glViewport(0, 0, eye->width, eye->height);
+    g_eyesWritten = 1;
 }
 
 void ndvr_unbind(void)

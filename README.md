@@ -59,13 +59,15 @@ $env:NDVR_VR = 1; $env:SS2PORT_NOVSYNC = 1
 .\ss2port.exe --windowed --verbose SS2.exe
 ```
 
-Menus and the HUD are still on the desktop window; start or load a game there, then put the headset on. Mouse turns
-the body, the head looks around freely, left controller menu button recentres. Tuning variables are listed at the top
-of `port-glue/vr_stereo.c`. `python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled --uninstall` puts your
+In the headset the HUD (and menus, the inventory and videos) is a panel in front of you, below eye level. The gun
+hand (`$env:NDVR_HAND="left"` for left-handed) aims: the game's mouse look follows the controller, so shots go where
+it points. Trigger = fire / click, A or X = use (right mouse button), B or Y = Tab (inventory; the hand then points
+at the panel with a cursor), thumbstick left/right = snap turn, left menu button = recentre (also moves the panel).
+Walking is still on the keyboard, and the gun model still hangs off your head. All tuning variables are listed at the
+top of `port-glue/vr_stereo.c`. `python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled --uninstall` puts your
 checkout back to vanilla.
 
-**Next up:** HUD and menus on a pointable panel in the headset, then controller locomotion, snap turn and a tracked
-weapon hand (with a left-handed option).
+**Next up:** thumbstick walking (relative to your body, not the gun), then the gun model moved to your hand.
 
 **Probe build (HUD and weapon):** `python3 tools/install_into_port.py <NewDarkRecompiled checkout> --probe`, rebuild with `--fastpaths`, then run
 without the VR flags: `$env:NDVR_PROBE=1; $env:SS2PORT_NOVSYNC=1; .\ss2port.exe --windowed SS2.exe`. Walk around in a level, fire the

@@ -13,16 +13,17 @@ index 00dd761..572f722 100644
    target_link_libraries(ss2port PRIVATE m)
  endif()
 diff --git a/port/backends/sdl2/gl_render.c b/port/backends/sdl2/gl_render.c
-index fc6c047..9e9af35 100644
+index fc6c047..5d105e3 100644
 --- a/port/backends/sdl2/gl_render.c
 +++ b/port/backends/sdl2/gl_render.c
-@@ -419,3 +419,6 @@ void gl_resize_backbuffer(int w, int h) {
+@@ -419,3 +419,7 @@ void gl_resize_backbuffer(int w, int h) {
      bind_target(&bb); target = &bb; cur_vp = (PlatViewport){ 0, 0, w, h, 0, 1 }; glViewport(0, 0, w, h); sc_on = 0; apply_scissor();
      glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
  }
 +
 +/* NewDarkVR: the framebuffer behind a render-target texture (render thread only). */
 +unsigned vr_gl_tex_fbo(PlatTexture *t, int *w, int *h) { ensure_fbo(t); *w = t->w; *h = t->h; return t->fbo; }
++unsigned vr_gl_bb_fbo(int *w, int *h) { ensure_fbo(&bb); *w = bb.w; *h = bb.h; return bb.fbo; }   /* NewDarkVR: the back buffer, for menus in the headset */
 diff --git a/port/core/fastpaths.c b/port/core/fastpaths.c
 index ba13283..f90af07 100644
 --- a/port/core/fastpaths.c
@@ -36,7 +37,7 @@ index ba13283..f90af07 100644
 +extern int vr_scene_hook(CPU *c);
 +int fp_00601430(CPU *c) { return vr_scene_hook(c); }
 diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
-index 413e0da..5ec91a6 100644
+index 413e0da..b5bda25 100644
 --- a/port/dx/d3d9.c
 +++ b/port/dx/d3d9.c
 @@ -151,11 +151,21 @@ static void default_state(State *s, int zenable) {
@@ -62,7 +63,7 @@ index 413e0da..5ec91a6 100644
  static void target_size(Device *d, uint32_t *w, uint32_t *h) {
      Res *r = R(d->rt); if (!r || r->backbuffer) { *w = d->bb_w; *h = d->bb_h; return; }
      if (r->container) { Res *t = R(r->container); *w = level_w(t, r->level); *h = level_h(t, r->level); } else { *w = r->w; *h = r->h; }
-@@ -410,6 +420,17 @@ static void deferred_draw(void *data, PlatDrawFn submit) {             /* on the
+@@ -410,6 +420,30 @@ static void deferred_draw(void *data, PlatDrawFn submit) {             /* on the
      for (int i = 0; i < h->nidx; i++) { uint16_t r = ix[i]; if (!done[r]) { done[r] = 1; vertex(&h->s, &h->L, &h->x, raw + (size_t)r * h->stride, &out[r]); } }
      submit(h->prim, out, (int)h->span, ix, h->nidx, &h->ps);
  }
@@ -77,18 +78,40 @@ index 413e0da..5ec91a6 100644
 +        vr_cap_buf[vr_cap_n++] = v[0]; vr_cap_buf[vr_cap_n++] = v[1]; vr_cap_buf[vr_cap_n++] = v[3];
 +    }
 +}
++/* NewDarkVR (port/core/vr_stereo.c): the game draws its HUD into a render-target texture and composites it over the 3D
++ * view with one full-screen quad at the end of the frame. That texture is the headset's HUD panel. */
++PlatTexture *vr_hud_tex; int vr_hud_w, vr_hud_h, vr_hud_seen;
++static void vr_hud_check(Device *d, uint32_t base, uint32_t stride, int pos) {
++    Res *t = R(d->st.tex[0]); if (!t || t->kind != R_TEX || !t->pt_rt || !t->pt) return;
++    uint32_t bw, bh; target_size(d, &bw, &bh);
++    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
++    for (uint32_t i = 0; i < 4; i++) {
++        uint32_t a = base + i * stride + (uint32_t)pos; float v[2]; if (!g_valid(a, 8)) return; memcpy(v, GP(a), 8);
++        if (v[0] < x0) x0 = v[0]; if (v[0] > x1) x1 = v[0]; if (v[1] < y0) y0 = v[1]; if (v[1] > y1) y1 = v[1];
++    }
++    if (x0 <= 1 && y0 <= 1 && x1 >= (float)bw - 1 && y1 >= (float)bh - 1) { vr_hud_tex = t->pt; vr_hud_w = (int)t->w; vr_hud_h = (int)t->h; vr_hud_seen = 1; }
++}
  static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint32_t stride, uint32_t idx, int idx32, int32_t base_vertex, uint32_t min_index, uint32_t num_vertices) {
      uint32_t nseq; int plat_prim;
      if (!prims || !prim_counts(type, prims, &nseq, &plat_prim)) return;
-@@ -426,6 +447,7 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+@@ -426,6 +460,8 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
      }
      if (idx && num_vertices && hi - lo + 1 > num_vertices + min_index) { /* trust the indices */ }
      uint32_t span = hi - lo + 1;
 +    if (vr_cap_on && L.rhw) vr_capture(vbase + lo * stride, stride, span, L.pos);
++    if (L.rhw && span == 4 && prims == 2 && !d->st.rs[7]) vr_hud_check(d, vbase + lo * stride, stride, L.pos);
      size_t maxidx = (size_t)nseq * 3 + 6;
      if (d->icap < (int)maxidx) { d->icap = (int)maxidx; d->ibuf = realloc(d->ibuf, (size_t)d->icap * sizeof *d->ibuf); }
      VState vs; vstate_of(&d->st, &vs);
-@@ -892,7 +914,8 @@ static void dev_setrt(CPU *c, ComObj *s) {
+@@ -789,6 +825,7 @@ static void dev_reset(CPU *c, ComObj *s) {
+ }
+ static void dev_present(CPU *c, ComObj *s) {
+     Device *d = DEV(s); (void)c;
++    { extern void vr_frame_present(void); vr_frame_present(); }   /* NewDarkVR: the headset frame ends here (port/core/vr_stereo.c) */
+     plat_gfx_present(); port_frame_presented(); plat_gfx_begin_frame(); plat_gfx_set_target(surface_target(R(d->rt))); apply_viewport(d);
+     c->eax = 0;
+ }
+@@ -892,7 +929,8 @@ static void dev_setrt(CPU *c, ComObj *s) {
  static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->rt) { OUTP(2, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->rt); OUTP(2, d->rt->guest); RET(0); }
  static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
  static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
@@ -98,7 +121,7 @@ index 413e0da..5ec91a6 100644
  static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; RET(0); }
  static void dev_clear(CPU *c, ComObj *s) {
      Device *d = DEV(s); uint32_t n = A(1), rects = A(2), flags = A(3); float z = u2f(A(5));
-@@ -1068,3 +1091,16 @@ const ShimDef d3d9_shims[] = {
+@@ -1068,3 +1106,16 @@ const ShimDef d3d9_shims[] = {
      { "D3DXLoadSurfaceFromSurface", sh_D3DXLoadSurfaceFromSurface, STD(8) },
      { 0, 0, 0 }
  };
@@ -115,3 +138,30 @@ index 413e0da..5ec91a6 100644
 +    if (!g_vr_dev) return;
 +    plat_gfx_set_target(surface_target(R(g_vr_dev->rt))); apply_viewport(g_vr_dev);
 +}
+diff --git a/port/win32/user32.c b/port/win32/user32.c
+index 53a4a09..4357200 100644
+--- a/port/win32/user32.c
++++ b/port/win32/user32.c
+@@ -230,6 +230,22 @@ static void on_event(const PlatEvent *e, void *user) {
+     for (int i = 0; i < nlisteners; i++) listeners[i](e);
+ }
+ void input_pump(void) { plat_video_poll(on_event, NULL); }
++/* ---- NewDarkVR (port/core/vr_stereo.c): controller input as if it came from the mouse ---- */
++int vr_input_captured(void) { return captured; }                 /* mouse look (pointer captured) vs a cursor on screen */
++int vr_input_mouse_motion(int dx, int dy) {                      /* relative motion, only while captured: turns the view */
++    if (!captured) return 0;
++    PlatEvent e; memset(&e, 0, sizeof e); e.type = PLAT_EV_MOUSE_MOVE; e.dx = dx; e.dy = dy; on_event(&e, NULL); return 1;
++}
++int vr_input_mouse_abs(int x, int y) {                           /* the cursor to a point of the drawing surface, only while not captured */
++    if (captured) return 0;
++    PlatEvent e; memset(&e, 0, sizeof e); e.type = PLAT_EV_MOUSE_MOVE; e.x = x; e.y = y; on_event(&e, NULL); return 1;
++}
++void vr_input_key(int dik, int down) {                          /* a DirectInput key code (0x0F Tab) */
++    PlatEvent e; memset(&e, 0, sizeof e); e.type = PLAT_EV_KEY; e.key = dik; e.down = down; on_event(&e, NULL);
++}
++void vr_input_mouse_button(int button, int down) {               /* 0 left, 1 right, 2 middle (as PLAT_EV_MOUSE_BUTTON) */
++    PlatEvent e; memset(&e, 0, sizeof e); e.type = PLAT_EV_MOUSE_BUTTON; e.button = button; e.down = down; on_event(&e, NULL);
++}
+ static int msg_waiting(void) { input_pump(); return qt != qh || quit_posted; }
+ static int match(const QMsg *m, uint32_t h, uint32_t lo, uint32_t hi) { return (!h || m->hwnd == h) && ((!lo && !hi) || (m->msg >= lo && m->msg <= hi)); }
+ /* takes (remove) or looks at the first queued message that matches into the guest MSG at p */
