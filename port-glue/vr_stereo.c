@@ -129,7 +129,9 @@ extern unsigned vr_gl_bb_fbo(int *w, int *h);                     /* port/backen
 extern int vr_input_captured(void), vr_input_mouse_motion(int dx, int dy), vr_input_mouse_abs(int x, int y);   /* port/win32/user32.c */
 extern void vr_input_mouse_button(int button, int down), vr_input_key(int dik, int down);
 extern int vr_gun_nv, vr_gun_near, vr_gun_draws; extern float vr_gun_bmin[3], vr_gun_bmax[3];   /* port/dx/d3d9.c */
-extern void vr_d3d_gun_capture(int on, float f, float cx, float cy), vr_d3d_gun_end(void), vr_d3d_gun_replay(const float *m, int mirror, float f);
+extern void vr_d3d_gun_pass(int mode, float f, float cx, float cy);
+extern void vr_d3d_gun_replay_eye(PlatTexture *t, float ox, float oy, float kx, float ky, int W, int H, const float *m, int mirror, float f);
+static float eye_map[2][4]; static float gun_f_eye; static int gun_W, gun_H;
 static float gun_m[12]; static int gun_mirror;
 static int gun_enabled = 1, gun_ready, gun_frames, gun_ref_nv, gun_odd; static double gun_scale = 1, gun_off[3], gun_sum[3], gun_g0[3];
 
@@ -296,9 +298,10 @@ static void controls(int in_game, double pw, double ph) {
 }
 
 /* ---------------------------------------------------------------- the held weapon on the gun hand
- * The engine places its first-person weapon relative to its own camera, which follows the gun hand, so from an eye it
- * is in the wrong place and mostly cut off. Each frame one extra scene render from the engine's camera keeps only the
- * weapon's draws (port/dx/d3d9.c, vr_d3d_gun_*); after each eye they are drawn again, moved by
+ * The engine draws its first-person weapon after the scene render, with the camera of the last scene render, placed
+ * relative to its own camera (which follows the gun hand). So after the eye renders one more scene render from the
+ * engine's own camera (zoom 0.5, drawing nothing) leaves that camera in place, the weapon's draws that follow are kept
+ * (port/dx/d3d9.c, vr_d3d_gun_*), and at the end of the frame they are drawn into each eye, moved by
  *   eye camera space <- p' = R (D (p - g0) + off) + hand <- capture camera space p
  * g0: the weapon's rest position (the middle of its bounding box, measured over its first 30 frames, again after a
  * weapon change), D: scale and the left-hand mirror, R: the gun hand's aim orientation seen from the eye, hand: the
@@ -370,6 +373,15 @@ void vr_frame_present(void) {
         if (!(fr_ok && fr.should_render && (fr.head.flags & NDVR_POSE_ORIENT_VALID))) { plat_gfx_deferred(rt_submit, &s, sizeof s); return; }
         track_update();
     }
+    if (st == 1 && gun_enabled) {                                 /* the weapon the engine drew after the scene, into each eye at the hand */
+        gun_measure();
+        for (int e = 0; e < 2; e++) {
+            gun_setup(&s.pose[e]);
+            vr_d3d_gun_replay_eye(hmd_tex[e], eye_map[e][0], eye_map[e][1], eye_map[e][2], eye_map[e][3], gun_W, gun_H, gun_m, gun_mirror, gun_f_eye);
+        }
+        vr_d3d_restore();
+    }
+    vr_d3d_gun_pass(0, 0, 0, 0);
     int W, H; plat_video_window_size(&W, &H);
     int src_w = 0, src_h = 0;
     if (st == 1 && hud && vr_hud_tex && vr_hud_w > 0) { s.panel = 1; s.ptex = vr_hud_tex; src_w = vr_hud_w; src_h = vr_hud_h; }
@@ -552,17 +564,6 @@ int vr_scene_hook(CPU *c) {
     }
     double tv = zarg > 0 ? 0.75 / zarg : 0.75, th = tv * asp;
     if (fov_h > 0) { th = tan(fov_h * PI_D / 360.0); tv = fov_v > 0 ? tan(fov_v * PI_D / 360.0) : th / asp; }
-    if (mode == 2 && gun_enabled) {                               /* the weapon, from the engine's own camera (see "the held weapon") */
-        uint32_t zlo = RD32(c->esp + 4), zhi = RD32(c->esp + 8);
-        double zc = 0.5; uint64_t zb; memcpy(&zb, &zc, 8);          /* a wide view, so less of the weapon is cut at the screen edges */
-        WR32(c->esp + 4, (uint32_t)zb); WR32(c->esp + 8, (uint32_t)(zb >> 32));
-        vr_d3d_gun_capture(1, (float)(H * zc / 1.5), W * 0.5f, H * 0.5f);
-        nd_00601430(c);
-        vr_d3d_gun_capture(0, 0, 0, 0);
-        *c = saved; memcpy(GP(p), keep_cam, sizeof keep_cam);
-        WR32(c->esp + 4, zlo); WR32(c->esp + 8, zhi); (void)zlo0; (void)zhi0;
-        gun_measure();
-    }
     for (int e = 0; e < 2; e++) {
         *c = saved;
         if (mode == 1) {
@@ -599,22 +600,32 @@ int vr_scene_hook(CPU *c) {
             }
             double px = tw / (R - L), py = tht / (U - D);                         /* texture pixels per unit of tangent */
             vr_d3d_view_map(1, (float)((-th - L) * px), (float)((U - tv) * py), (float)(2 * th * px / W), (float)(2 * tv * py / H));
+            eye_map[e][0] = (float)((-th - L) * px); eye_map[e][1] = (float)((U - tv) * py); eye_map[e][2] = (float)(2 * th * px / W); eye_map[e][3] = (float)(2 * tv * py / H);
             sub.fov[e] = *f;
             vr_d3d_eye_begin(hmd_tex[e], tw, tht);
             nd_00601430(c);
-            if (gun_enabled) { gun_setup(ep); vr_d3d_gun_replay(gun_m, gun_mirror, (float)(H * (zarg > 0 ? zarg : 1.0) / 1.5)); }
             continue;
         }
         vr_d3d_eye_begin(eye_tex[e], W, H);
         nd_00601430(c);
     }
+    if (mode == 2 && gun_enabled) {                               /* the engine's own camera, for the weapon drawn after this (see "the held weapon") */
+        *c = saved; memcpy(GP(p), keep_cam, sizeof keep_cam);
+        double zc = 0.5; uint64_t zb; memcpy(&zb, &zc, 8);          /* a wide view, so less of the weapon is cut at the screen edges */
+        WR32(c->esp + 4, (uint32_t)zb); WR32(c->esp + 8, (uint32_t)(zb >> 32));
+        vr_d3d_gun_pass(1, 0, 0, 0);
+        nd_00601430(c);
+        vr_d3d_gun_pass(0, 0, 0, 0);
+        WR32(c->esp + 4, zlo0); WR32(c->esp + 8, zhi0);
+        gun_f_eye = (float)(H * (zarg > 0 ? zarg : 1.0) / 1.5); gun_W = W; gun_H = H;
+    }
     busy = 0;                                                      /* c is now as the original leaves it after returning */
-    vr_d3d_gun_end();
     vr_d3d_view_map(0, 0, 0, 1, 1);
     memcpy(GP(p), keep_cam, sizeof keep_cam);
     memcpy(GP(CAM_COPY), keep_copy, sizeof keep_copy);             /* everything else sees the engine's own camera, */
     if (mode == 2) memcpy(GP(CAM_COPY), keep_cam, 24);            /* as the original would have left it (sound, culling, the aim below) */
     vr_d3d_restore();
+    if (mode == 2 && gun_enabled) vr_d3d_gun_pass(3, (float)(H * 0.5 / 1.5), W * 0.5f, H * 0.5f);   /* keep the weapon the engine draws next */
     if (mode == 1) {
         plat_gfx_copy(eye_tex[0], 0, 0, W, H, NULL, 0, 0, W / 2, H, 1);
         plat_gfx_copy(eye_tex[1], 0, 0, W, H, NULL, W / 2, 0, W - W / 2, H, 1);

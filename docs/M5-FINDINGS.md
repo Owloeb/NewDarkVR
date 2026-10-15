@@ -121,3 +121,10 @@ eye renders cannot be the source. Now each frame one extra scene render from the
 so the screen edges cut less) keeps only the weapon's draws (nothing drawn, no clears); the eye renders drop the
 engine's weapon; after each eye the kept draws are moved to the hand and drawn after a depth clear. The startup log
 now names the NewDarkVR build (stamped by the installer).
+
+Run of 0a1f9ad: the capture pass kept 0 weapon draws every frame. The weapon is not drawn inside
+render_scene_from_camera at all: the engine draws it after that returns (depth-only clear, weapon draws, EndScene),
+with the camera state the last scene render left. In headset mode that was the right eye's camera, drawn onto the
+desktop back buffer: the broken pistol on the monitor and nothing in the headset. Now: after the eyes one more
+scene render from the engine's own camera (zoom 0.5, nothing drawn) sets that camera; the weapon draws that follow, up
+to EndScene, are kept instead of drawn; at Present they are moved to the hand and drawn into each eye's image.
