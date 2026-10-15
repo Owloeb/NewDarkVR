@@ -60,3 +60,18 @@ shot, 10 after the second; still in: global copies 0x8cdb82, 0x93a066, 0x93cfb6,
 and heap 0x01998a22, 0x01d4fab2, 0x01d4fac8, 0x01d4fade (0x1ae past the heading master, 0x16 apart: per-submodel
 facings of the physics model), 0x023a61c6. The two tested (0x8cdb82, 0x93a066) are rebuilt. Recoil moves the view
 pitch about -6 degrees, so "the view turned" now means +6..+14 for our +10, and heap entries are tested first.
+
+## Hunt run 2 (13+ shots)
+
+- Pitch: every u16 copy of the camera pitch (globals, camera object, physics submodels) and every float-radian copy is
+  rebuilt each frame; none is the master. The master pitch is not stored as the camera's u16 nor as radians.
+- Aim test with the heading master turned +30 for 2 frames after the press: shots still hit the crosshair, while the
+  earlier permanent write moved them. So the projectile is launched more than 2 frames after the key press (or the
+  launch reads the facing again later); writing the master only around the press is not enough.
+- Visible side effect on presses during a reload: the view swings left for a moment.
+
+Change of approach for aiming: drive the game's own mouse look instead of writing its state. Synthetic mouse
+motion (`vr_input_mouse_motion` in port/win32/user32.c) turns heading and pitch exactly like the player's mouse, so
+shots, flash and gun follow by construction; a closed loop can steer the camera to the controller's direction.
+`NDVR_MOUSETEST` measures degrees per count, delay and smoothing first. The probe's draw dumps are now opt-in
+(`NDVR_PROBE_CAPTURE=1`) because the PowerShell window truncates long output.

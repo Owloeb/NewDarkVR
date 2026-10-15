@@ -42,7 +42,7 @@ Adds the forwarder in `port/core/fastpaths.c`, `vr_d3d_*` in `port/dx/d3d9.c`, `
 
 Applied by `tools/install_into_port.py <checkout> --probe` together with `port-glue/vr_probe.c` and `vr_probe.h`. Measurement
 only, off unless `NDVR_PROBE=1`. Adds draw/clear/BeginScene/EndScene/Present calls in `port/dx/d3d9.c` and log-only entry
-hooks in `port/core/fastpaths.c` (plus a heap-arena accessor in `port/core/heap.c`) for `render_frame_world`, `d3d_display_set_overlay`, `d3d_display_end_overlay`,
+hooks in `port/core/fastpaths.c` (plus a heap-arena accessor in `port/core/heap.c` and `vr_input_mouse_motion` in `port/win32/user32.c`) for `render_frame_world`, `d3d_display_set_overlay`, `d3d_display_end_overlay`,
 `d3d_display_end_frame`, `d3d_display_flip` and `cmd_fire_weapon` (all return 0, so the original always runs). It answers:
 which draws are the HUD, which are the held weapon, and where the engine keeps the facing a shot is aimed with. Run it
 without `NDVR_VR`/`NDVR_STEREO`. Details and the optional `NDVR_AIMTEST_*` experiment: header of `port-glue/vr_probe.c`.

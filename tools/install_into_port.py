@@ -26,7 +26,7 @@ port = os.path.abspath(args[0])
 core = os.path.join(port, 'port', 'core')
 if not os.path.isfile(os.path.join(core, 'fastpaths.c')): sys.exit(f'{port} does not look like a NewDarkRecompiled checkout (no port/core/fastpaths.c)')
 
-tracked = ['port/core/fastpaths.c', 'port/dx/d3d9.c', 'port/backends/sdl2/gl_render.c', 'port/CMakeLists.txt', 'port/core/heap.c']
+tracked = ['port/core/fastpaths.c', 'port/dx/d3d9.c', 'port/backends/sdl2/gl_render.c', 'port/CMakeLists.txt', 'port/core/heap.c', 'port/win32/user32.c']
 copied = ['port/core/vr_stereo.c', 'port/core/ndvr_xr.c', 'port/core/ndvr.h', 'port/core/openxr', 'port/core/vr_probe.c', 'port/core/vr_probe.h']
 
 def git(*a, check=True): return subprocess.run(['git', '-C', port, *a], check=check, capture_output=True, text=True)

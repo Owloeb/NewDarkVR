@@ -4,7 +4,7 @@
  * (except the optional NDVR_AIMTEST experiment below).
  *
  *   NDVR_PROBE=1         switch the probe on (run it WITHOUT NDVR_VR / NDVR_STEREO: the stereo hook draws the scene twice)
- *   NDVR_PROBE_IDLE=n    capture two frames in detail when frame n is presented (default 360; 0 = never)
+ *   NDVR_PROBE_IDLE=n    capture two frames in detail when frame n is presented (default 360 with NDVR_PROBE_CAPTURE=1)
  *
  * What it logs (lines start with "NDVR PROBE", written with port_log, so no --verbose needed):
  *   - every 300 frames a one-line summary: draws, draws without depth test, pre-transformed draws, draws between
@@ -27,6 +27,8 @@
  *                        frames (default 1), then put it back. Only "fire..." key commands trigger it. If the shot lands
  *                        that many degrees off the crosshair, one of those copies is what aims; narrow it down with _CAND.
  *   NDVR_HUNT=1          find the master heading and pitch, then aim-test them (see "NDVR_HUNT" below).
+ *   NDVR_MOUSETEST=n     measure how mouse motion turns the camera (see "NDVR_MOUSETEST" below).
+ *   NDVR_PROBE_CAPTURE=1 the per-draw frame dumps (idle frame 360 and after each of the first six shots); off by default
  * Also logged on each press: every place holding the camera's forward direction as three floats (a vector or a
  * matrix row), in the camera object and in global data. */
 #include <stdio.h>
@@ -40,13 +42,14 @@
 #define PLAYER_CAM 0x00a3acb8u
 #define GLOBALS_LO 0x00780000u
 #define GLOBALS_HI 0x00a80000u
+extern int vr_input_mouse_motion(int dx, int dy);   /* port/win32/user32.c (probe patch) */
 extern int vr_heap_arenas(uint32_t *out, int max, uint32_t *arena_size);   /* port/core/heap.c (probe patch) */
 #define P(fmt, ...) port_log("NDVR PROBE " fmt, ##__VA_ARGS__)
 
 int vr_probe_on;
 static int idle_frame = 360, aim_frames = 1, aim_cand = 0;
 static double aim_head, aim_pitch;
-static int hunt;                                                   /* NDVR_HUNT, see below */
+static int hunt, capture, mousetest;                                                   /* NDVR_HUNT, see below */
 static unsigned frame_no, seq, n_draw, n_noz, n_rhw, n_ovl, n_clear, fires;
 static int cap_left, overlay, zclears;
 #define AIM_MAX 16
@@ -63,7 +66,8 @@ __attribute__((constructor)) static void probe_init(void) {
     aim_head = envd("NDVR_AIMTEST_HEAD", 0); aim_pitch = envd("NDVR_AIMTEST_PITCH", 0);
     aim_frames = envi("NDVR_AIMTEST_FRAMES", 1); if (aim_frames < 1) aim_frames = 1;
     aim_cand = envi("NDVR_AIMTEST_CAND", -1);
-    hunt = envi("NDVR_HUNT", 0);
+    hunt = envi("NDVR_HUNT", 0); capture = envi("NDVR_PROBE_CAPTURE", 0); mousetest = envi("NDVR_MOUSETEST", 0);
+    if (!capture) idle_frame = envi("NDVR_PROBE_IDLE", 0);
 }
 
 void vr_probe_draw(const VrProbeDraw *d) {
@@ -226,12 +230,35 @@ static void hunt_press(const Cand *cand, const int *layout, int nc, int nglob, c
     P("HUNT AIM: master heading turned %+.1f%s for %d frames: where does this shot land?", dh, mp_kind >= 0 && aim_pitch != 0 ? " (and pitch)" : "", HA.hold);
 }
 
+/* ---- NDVR_MOUSETEST=n: every 300 frames, alternately, move the mouse n counts sideways or n counts up/down for one
+ * frame (as if the player did) and log how the camera's heading and pitch respond over the next 30 frames: the
+ * degrees per count, the delay and any smoothing. That is what aiming with a controller through the game's own mouse
+ * look needs. Stand still and do not touch the mouse during the test. */
+static int mt_phase = -1, mt_axis, mt_sign = 1, mt_n; static uint16_t mt_h0, mt_p0; static char mt_line[600]; static int mt_len;
+static void mouse_test_frame(void) {
+    if (mt_phase < 0) {
+        if (frame_no < 600 || frame_no % 150) return;
+        mt_axis = (frame_no / 150) & 1; if (!mt_axis) mt_sign = -mt_sign;
+        mt_h0 = RD16(CAM_COPY + 20); mt_p0 = RD16(CAM_COPY + 18);
+        if (!vr_input_mouse_motion(mt_axis ? 0 : mt_sign * mousetest, mt_axis ? mt_sign * mousetest : 0)) return;   /* menus: not captured */
+        mt_phase = 0; mt_n++;
+        mt_len = snprintf(mt_line, sizeof mt_line, "MOUSE test %d: %s %+d counts; frames after (heading, pitch change in degrees):", mt_n, mt_axis ? "dy" : "dx", mt_sign * mousetest);
+        return;
+    }
+    mt_phase++;
+    double dh = s16(RD16(CAM_COPY + 20) - mt_h0) * 360.0 / 65536.0, dp = s16(RD16(CAM_COPY + 18) - mt_p0) * 360.0 / 65536.0;
+    if (mt_phase <= 6 || mt_phase == 10 || mt_phase == 20 || mt_phase == 30)
+        mt_len += snprintf(mt_line + mt_len, sizeof mt_line - (size_t)mt_len, " %d:(%+.2f,%+.2f)", mt_phase, dh, dp);
+    if (mt_phase == 30) { P("%s", mt_line); mt_phase = -1; }
+}
+
 void vr_probe_present(void) {
     if (!vr_probe_on) return;
     if (cap_left > 0) { P("---- end of frame %u: %u draws (%u without depth test, %u pre-transformed, %u in overlay), %u clears, %d depth clears", frame_no, n_draw, n_noz, n_rhw, n_ovl, n_clear, zclears); cap_left--; }
     else if (frame_no % 300 == 0) P("frame %u: %u draws (%u without depth test, %u pre-transformed, %u in overlay), %u clears, %d depth clears", frame_no, n_draw, n_noz, n_rhw, n_ovl, n_clear, zclears);
     if (aim_hold > 0 && --aim_hold == 0) { for (int i = 0; i < aim_n; i++) { WR16(aim_t[i].pitch_at, aim_t[i].keep_p); WR16(aim_t[i].head_at, aim_t[i].keep_h); } P("AIMTEST: %d facing copies put back", aim_n); aim_n = 0; }
     if (hunt) hunt_frame();
+    if (mousetest) mouse_test_frame();
     frame_no++; seq = 0; n_draw = n_noz = n_rhw = n_ovl = n_clear = 0; zclears = 0; overlay = 0;
     if (idle_frame > 0 && frame_no == (unsigned)idle_frame) { cap_left = 2; P("---- idle capture of frames %u and %u ----", frame_no, frame_no + 1); }
 }
@@ -270,7 +297,7 @@ int vr_probe_fire(CPU *c) {
     }
     P("FIRE command (frame %u, %s) eax=%08x ecx=%08x edx=%08x stack:%s", frame_no, press ? "press" : "release/other", c->eax, c->ecx, c->edx, b);
     if (!press || !is_fire) return 0;
-    if (fires < 6) { cap_left = 3; seq = 0; zclears = 0; }
+    if (capture && fires < 6) { cap_left = 3; seq = 0; zclears = 0; }
     fires++;
     float cam[3] = { rdf(CAM_COPY), rdf(CAM_COPY + 4), rdf(CAM_COPY + 8) };
     P("FIRE render camera copy: pos (%.3f, %.3f, %.3f) cell %08x bank %u pitch %u heading %u (65536 = 360 deg)", (double)cam[0], (double)cam[1], (double)cam[2], RD32(CAM_COPY + 12), RD16(CAM_COPY + 16), RD16(CAM_COPY + 18), RD16(CAM_COPY + 20));
