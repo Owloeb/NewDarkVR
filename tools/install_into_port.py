@@ -46,7 +46,11 @@ if chk.returncode:
     sys.exit('The patch does not apply to this checkout:\n' + chk.stderr +
              '\nIf an earlier NewDarkVR patch is applied, undo it first:  python3 tools/install_into_port.py ' + port + ' --uninstall\n'
              '(or: git checkout port/core/fastpaths.c port/dx/d3d9.c port/backends/sdl2/gl_render.c port/CMakeLists.txt, and delete port/core/vr_stereo.c)')
-shutil.copy(os.path.join(repo, 'port-glue', 'vr_stereo.c'), os.path.join(core, 'vr_stereo.c'))
+def build_id():                       # the NewDarkVR commit, printed at start-up so a log says which build ran
+    r = subprocess.run(['git', '-C', repo, 'describe', '--always', '--dirty'], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else 'unknown'
+with open(os.path.join(repo, 'port-glue', 'vr_stereo.c'), encoding='utf-8') as f: vs = f.read()
+with open(os.path.join(core, 'vr_stereo.c'), 'w', encoding='utf-8', newline='\n') as f: f.write('#define NDVR_BUILD "%s"\n' % build_id() + vs)
 shutil.copy(os.path.join(repo, 'include', 'ndvr.h'), os.path.join(core, 'ndvr.h'))
 with open(os.path.join(repo, 'src', 'ndvr_xr.c'), encoding='utf-8') as f: src = f.read()
 with open(os.path.join(core, 'ndvr_xr.c'), 'w', encoding='utf-8', newline='\n') as f: f.write('#ifdef _WIN32\n' + src + '\n#endif /* _WIN32 */\n')
@@ -59,7 +63,7 @@ if probe:
     r = git('apply', ppatch, check=False)
     if r.returncode: sys.exit('The probe patch does not apply on top of the VR patch:\n' + r.stderr)
     for f in ('vr_probe.c', 'vr_probe.h'): shutil.copy(os.path.join(repo, 'port-glue', f), os.path.join(core, f))
-print('NewDarkVR installed into', port, '(with the probe)' if probe else '')
+print('NewDarkVR', build_id(), 'installed into', port, '(with the probe)' if probe else '')
 print('Next: python3 port/build.py "<path to SS2.exe>" --target windows --install --fastpaths')
 if probe: print('Probe run (not with NDVR_VR):  $env:NDVR_PROBE=1; $env:SS2PORT_NOVSYNC=1; .\\ss2port.exe --windowed SS2.exe    then walk around, fire a weapon a few times, quit, and send the log')
 print('Then copy openxr_loader.dll next to ss2port.exe and run with:  $env:NDVR_VR=1; $env:SS2PORT_NOVSYNC=1; .\\ss2port.exe --windowed --verbose SS2.exe')

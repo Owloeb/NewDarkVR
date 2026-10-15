@@ -110,3 +110,14 @@ position is the middle of the weapon's bounding box over its first 30 frames (re
 changes by a quarter for 15 frames: a weapon change). Left hand: mirrored on x, culling flipped. Unknowns: whether
 1/rhw is exactly the depth in engine units (if not, the weapon sits nearer or further than the hand), and the foot
 as the engine unit (NDVR_UNIT_M).
+
+## Weapon, second version: a capture pass
+
+Two headset runs of the first version logged no weapon lines at all: the build that ran did not have the weapon code.
+What Owen saw (a broken, flickering pistol) was the game's own weapon in the eye renders. The engine places the
+weapon relative to its own camera, which now follows the gun hand, while the eyes look from the head: the weapon hangs
+off the aim direction at the eye position and the eye's frustum cuts it, more the further aim and gaze differ. So the
+eye renders cannot be the source. Now each frame one extra scene render from the engine's own camera (zoom 0.5, wide,
+so the screen edges cut less) keeps only the weapon's draws (nothing drawn, no clears); the eye renders drop the
+engine's weapon; after each eye the kept draws are moved to the hand and drawn after a depth clear. The startup log
+now names the NewDarkVR build (stamped by the installer).
