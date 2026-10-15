@@ -42,6 +42,10 @@ if undo:
 
 patch = os.path.join(repo, 'patches', 'vr-port-hooks.patch')
 chk = git('apply', '--check', patch, check=False)
+if chk.returncode and os.path.exists(os.path.join(core, 'vr_stereo.c')):   # an earlier NewDarkVR install: replace it
+    print('replacing the earlier NewDarkVR install')
+    git('checkout', '--', *tracked); remove_copied()
+    chk = git('apply', '--check', patch, check=False)
 if chk.returncode:
     sys.exit('The patch does not apply to this checkout:\n' + chk.stderr +
              '\nIf an earlier NewDarkVR patch is applied, undo it first:  python3 tools/install_into_port.py ' + port + ' --uninstall\n'
