@@ -25,7 +25,11 @@
  *   NDVR_AIMTEST_HEAD=deg NDVR_AIMTEST_PITCH=deg   experiment: when the fire key goes down, add this to every copy of the
  *                        facing that matches the camera (or only candidate NDVR_AIMTEST_CAND=n) for NDVR_AIMTEST_FRAMES
  *                        frames (default 1), then put it back. Only "fire..." key commands trigger it. If the shot lands
- *                        that many degrees off the crosshair, one of those copies is what aims; narrow it down with _CAND. */
+ *                        that many degrees off the crosshair, one of those copies is what aims; narrow it down with _CAND.
+ *   NDVR_PERSIST=deg     experiment: on each fire press turn ONE of those copies (the next one each shot) and never put it
+ *                        back; 10 frames later log whether the value stuck (a master copy) and whether the view turned.
+ * Also logged on each press: every place holding the camera's forward direction as three floats (a vector or a
+ * matrix row), in the camera object and in global data. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -46,6 +50,7 @@ static unsigned frame_no, seq, n_draw, n_noz, n_rhw, n_ovl, n_clear, fires;
 static int cap_left, overlay, zclears;
 #define AIM_MAX 16
 static struct { uint32_t pitch_at, head_at; uint16_t keep_p, keep_h; } aim_t[AIM_MAX]; static int aim_n, aim_hold;
+static double persist_deg; static int persist_k, persist_wait; static uint32_t persist_at, persist_cam_before; static uint16_t persist_wrote;
 
 static int envi(const char *n, int d) { const char *e = getenv(n); return e && *e ? atoi(e) : d; }
 static double envd(const char *n, double d) { const char *e = getenv(n); return e && *e ? atof(e) : d; }
@@ -58,6 +63,7 @@ __attribute__((constructor)) static void probe_init(void) {
     aim_head = envd("NDVR_AIMTEST_HEAD", 0); aim_pitch = envd("NDVR_AIMTEST_PITCH", 0);
     aim_frames = envi("NDVR_AIMTEST_FRAMES", 1); if (aim_frames < 1) aim_frames = 1;
     aim_cand = envi("NDVR_AIMTEST_CAND", -1);
+    persist_deg = envd("NDVR_PERSIST", 0);
 }
 
 void vr_probe_draw(const VrProbeDraw *d) {
@@ -107,6 +113,14 @@ void vr_probe_present(void) {
     if (cap_left > 0) { P("---- end of frame %u: %u draws (%u without depth test, %u pre-transformed, %u in overlay), %u clears, %d depth clears", frame_no, n_draw, n_noz, n_rhw, n_ovl, n_clear, zclears); cap_left--; }
     else if (frame_no % 300 == 0) P("frame %u: %u draws (%u without depth test, %u pre-transformed, %u in overlay), %u clears, %d depth clears", frame_no, n_draw, n_noz, n_rhw, n_ovl, n_clear, zclears);
     if (aim_hold > 0 && --aim_hold == 0) { for (int i = 0; i < aim_n; i++) { WR16(aim_t[i].pitch_at, aim_t[i].keep_p); WR16(aim_t[i].head_at, aim_t[i].keep_h); } P("AIMTEST: %d facing copies put back", aim_n); aim_n = 0; }
+    if (persist_wait > 0 && --persist_wait == 0) {
+        int dv = (RD16(persist_at) - persist_wrote) & 0xFFFF, dc = (RD16(CAM_COPY + 20) - (int)persist_cam_before) & 0xFFFF;
+        if (dv > 32767) dv -= 65536;
+        if (dc > 32767) dc -= 65536;
+        P("PERSIST: heading at %08x is now %u (we wrote %u: %s); the camera heading moved %+.1f degrees since (%s)", persist_at, RD16(persist_at), persist_wrote,
+          dv > -64 && dv < 64 ? "KEPT, this is a master copy" : "overwritten, derived from somewhere else", dc * 360.0 / 65536.0,
+          dc * 360.0 / 65536.0 > persist_deg * 0.5 ? "the view turned with it" : "the view did not turn");
+    }
     frame_no++; seq = 0; n_draw = n_noz = n_rhw = n_ovl = n_clear = 0; zclears = 0; overlay = 0;
     if (idle_frame > 0 && frame_no == (unsigned)idle_frame) { cap_left = 2; P("---- idle capture of frames %u and %u ----", frame_no, frame_no + 1); }
 }
@@ -126,7 +140,7 @@ static int scan(uint32_t base, uint32_t len, const float cam[3], Cand *out, int 
     }
     return n;
 }
-static int ang_close(int a, int b) { int d = (a - b) & 0xFFFF; if (d > 32767) d -= 65536; return d > -3000 && d < 3000; }
+static int ang_close(int a, int b) { int d = (a - b) & 0xFFFF; if (d > 32767) d -= 65536; return d > -16 && d < 16; }
 static int is_press(CPU *c) {                                                  /* an argument string like "1.0" (key down) */
     for (int i = 0; i < 4; i++) {
         uint32_t w = RD32(c->esp + 4 + 4u * (uint32_t)i);
@@ -145,8 +159,9 @@ int vr_probe_fire(CPU *c) {
         if (w >= 0x10000u && g_valid(w, 8)) { const char *s = (const char *)GP(w); int ok = 1; for (int k = 0; k < 6 && s[k]; k++) if ((unsigned char)s[k] < 32 || (unsigned char)s[k] > 126) ok = 0; if (ok && s[0]) n += snprintf(b + n, sizeof b - (size_t)n, "(\"%.20s\")", s); }
     }
     P("FIRE command (frame %u, %s) eax=%08x ecx=%08x edx=%08x stack:%s", frame_no, press ? "press" : "release/other", c->eax, c->ecx, c->edx, b);
-    if (!press || !is_fire || fires >= 6) return 0;
-    fires++; cap_left = 3; seq = 0; zclears = 0;
+    if (!press || !is_fire) return 0;
+    if (fires < 6) { cap_left = 3; seq = 0; zclears = 0; }
+    fires++;
     float cam[3] = { rdf(CAM_COPY), rdf(CAM_COPY + 4), rdf(CAM_COPY + 8) };
     P("FIRE render camera copy: pos (%.3f, %.3f, %.3f) cell %08x bank %u pitch %u heading %u (65536 = 360 deg)", (double)cam[0], (double)cam[1], (double)cam[2], RD32(CAM_COPY + 12), RD16(CAM_COPY + 16), RD16(CAM_COPY + 18), RD16(CAM_COPY + 20));
     uint32_t obj = RD32(PLAYER_CAM);
@@ -170,6 +185,35 @@ int vr_probe_fire(CPU *c) {
           RD32(a), RD32(a + 4), RD32(a + 8), RD32(a + 12), RD32(a + 16), RD32(a + 20));
     }
     P("FIRE %d of them hold the same facing as the render camera", nmatch);
+    {   /* the facing as a direction vector or matrix row: floats (cos h cos p, sin h cos p, +-sin p), heading 0 = +x */
+        double h = camh * (2.0 * 3.14159265358979 / 65536.0), pt = (int16_t)camp * (2.0 * 3.14159265358979 / 65536.0);
+        float f[3] = { (float)(cos(h) * cos(pt)), (float)(sin(h) * cos(pt)), (float)sin(pt) };
+        int hits = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            uint32_t lo = pass ? GLOBALS_LO : obj, hi = pass ? GLOBALS_HI : obj + 0x400;
+            if (!pass && !g_valid(obj, 0x400)) continue;
+            for (uint32_t a = lo; a + 12 <= hi && hits < 16; a += 4) {
+                if (!g_valid(a, 12)) break;
+                float v[3]; memcpy(v, GP(a), 12);
+                if (!(fabsf(v[0] - f[0]) < 0.01f && fabsf(v[1] - f[1]) < 0.01f && (fabsf(v[2] - f[2]) < 0.01f || fabsf(v[2] + f[2]) < 0.01f))) continue;
+                if (fabsf(f[0]) + fabsf(f[1]) < 0.05f) continue;
+                hits++;
+                P("  DIR @%08x (%s) (%.4f, %.4f, %.4f)  next %.4f %.4f %.4f %.4f %.4f %.4f", a, pass ? "global" : "object", (double)v[0], (double)v[1], (double)v[2],
+                  (double)rdf(a + 12), (double)rdf(a + 16), (double)rdf(a + 20), (double)rdf(a + 24), (double)rdf(a + 28), (double)rdf(a + 32));
+            }
+        }
+        P("FIRE %d place(s) hold the camera's forward direction as floats (%.4f, %.4f, +-%.4f)", hits, (double)f[0], (double)f[1], (double)f[2]);
+    }
+    if (persist_deg != 0 && persist_wait == 0 && nmatch) {     /* NDVR_PERSIST=deg: turn one copy per shot, never put back, see if it sticks */
+        int k = persist_k++ % nmatch, j = -1;
+        for (int i = 0; i < nc; i++) if (layout[i] && k-- == 0) { j = i; break; }
+        if (j >= 0) {
+            persist_at = cand[j].addr + (layout[j] == 1 ? 20u : 16u); persist_cam_before = RD16(CAM_COPY + 20);
+            persist_wrote = (uint16_t)(RD16(persist_at) + (int)floor(persist_deg * 65536.0 / 360.0 + 0.5));
+            WR16(persist_at, persist_wrote); persist_wait = 10;
+            P("PERSIST: CAND %d heading (%08x) turned %+.1f degrees and left there; checking in 10 frames (keep the mouse still)", j, persist_at, persist_deg);
+        }
+    }
     if ((aim_head != 0 || aim_pitch != 0) && aim_hold == 0) {                       /* NDVR_AIMTEST_CAND=-1 (default): every copy that matches the camera */
         int dh = (int)floor(aim_head * 65536.0 / 360.0 + 0.5), dp = (int)floor(aim_pitch * 65536.0 / 360.0 + 0.5);
         aim_n = 0;

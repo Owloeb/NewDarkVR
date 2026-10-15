@@ -21,3 +21,11 @@ Consequences:
 `cmd_fire_weapon` (0x0043b220 in `symbols/manual.sym`) is really the shared handler of all key commands (`fire_weapon`, `drag_and_drop_mode`...); the command name is the first stack argument, the argument string ("1.0" / "0") the second.
 
 The player camera object pointer `*0xa3acb8` (0xd9ba10 in that run) has the player's position at +8 (x, y, z) and the facing straight after it: **bank u16 at +20, pitch u16 at +22, heading u16 at +24** (the render camera copy at 0xa57e00 has the same facing but with a cell word between, so +16/+18/+20 there). Its pitch and heading equal the render camera's exactly. A second copy with the camera copy's layout sits in global data (0x8cdb70). A third at 0xa3acc8 never changes (stale). Which copy a shot is aimed with is what `NDVR_AIMTEST_*` finds out.
+
+## Aim test 1 (NDVR_AIMTEST_HEAD=40, 2 frames, all four matching copies)
+
+Shots still hit the crosshair; the **muzzle flash** appeared on the left of the screen (heading +40 turns left), so the
+flash / gun attachment reads one of those copies, but the projectile direction does not, or reads it at a moment when
+it has already been rewritten from somewhere else. ("Stopped after reloading" was the probe's own six-shot limit.)
+Next: `NDVR_PERSIST` finds which copy is the master (a value that sticks and turns the view), and the probe now also
+lists every place holding the camera's forward direction as floats (a vector or a rotation matrix row).
