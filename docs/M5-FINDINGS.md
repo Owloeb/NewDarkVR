@@ -153,3 +153,21 @@ are), at real scale. The capture path stays as the fallback (NDVR_GUN_SCALE to s
 - The captured weapon in the probe runs was about 80 triangles per frame. The files hold far more than what reaches
   the device, so drawing the model from its file will show much more of it. The game's own models are inside the
   .crf archives (zip files) in Data/res.
+
+### The original game's first-person models (Data/res/OBJ.CRF, tools/lgmd_info.py)
+
+| model | polygons | open edges | | model | polygons | open edges |
+|---|---|---|---|---|---|---|
+| ATEK_H (pistol) | 79 | 45% | | FSN_H (fusion) | 126 | 7% |
+| AR15_H (assault) | 126 | 38% | | AL_H (laser) | 111 | 16% |
+| SG_H (shotgun) | 60 | 39% | | AMP_H (psi amp) | 114 | 24% |
+| GREN_H (grenade l.) | 47 | 50% | | VIRO_H (viral prolif.) | 102 | 32% |
+| EMPGUN_H (EMP rifle) | 59 | 53% | | SFG_H (stasis) | 54 | 32% |
+| ES_H (electro shock) | 36 | 61% | | PIPE_H (pipe) | 8 | 67% |
+| ATEK_W (world pistol) | 78 | 17% | | | | |
+
+The original pistol is 79 polygons and the probe captured about 75 triangles of it per frame: the engine drew nearly
+all of it, so the missing half of the vanilla pistol really is not modelled. Most originals are open shells built for
+one view; the fusion cannon and laser are close to complete. Tacticool's are far more detailed (the pistol 1033).
+Plan for originals: draw both sides of every polygon (an open shell then looks solid from most angles instead of
+see-through), and per weapon fall back to the world model (more complete, e.g. ATEK_W 17% open) with the arm hidden.
