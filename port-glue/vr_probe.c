@@ -160,7 +160,7 @@ static void hunt_frame(void) {
         uint32_t now = rd_val(T.kind, T.at);
         int kept = T.kind ? now == T.wrote : abs(s16((int)now - (int)T.wrote)) < 64;
         double moved = s16(RD16(CAM_COPY + (T.is_pitch ? 18 : 20)) - T.cam_before) * 360.0 / 65536.0;
-        int view = fabs(moved) > 5.0;
+        int view = moved > 6.0 && moved < 14.0;                  /* we turn +10; recoil kicks the pitch the other way (-6 in tests) */
         P("HUNT %s test of %08x (%s): value %s, view %s %+.1f degrees -> %s", T.is_pitch ? "pitch" : "heading", T.at,
           T.kind == 0 ? "u16" : T.kind == 1 ? "float rad" : "float -rad", kept ? "KEPT" : "rebuilt by the game", T.is_pitch ? "pitch moved" : "heading moved", moved,
           kept && view ? "MASTER" : "ruled out");
@@ -205,7 +205,12 @@ static void hunt_press(const Cand *cand, const int *layout, int nc, int nglob, c
         return;
     }
     if (mp_kind < 0 && npc > 0 && npc <= 24 && presses >= 3) {
-        int j = -1; for (int i = 0; i < npc; i++) if (!is_ruled(pcs[i].a)) { j = i; break; }
+        int j = -1;                                 /* heap first: the global ones and the camera object are rebuilt copies */
+        for (int pass = 0; pass < 2 && j < 0; pass++)
+            for (int i = 0; i < npc && j < 0; i++) {
+                int heap = pcs[i].a >= 0x01000000u && !(pcs[i].a >= RD32(PLAYER_CAM) && pcs[i].a < RD32(PLAYER_CAM) + 0x400);
+                if ((pass == 0) == heap && !is_ruled(pcs[i].a)) j = i;
+            }
         if (j >= 0) {
             T.is_pitch = 1; T.kind = pcs[j].kind; T.at = pcs[j].a; T.orig = rd_val(T.kind, T.at);
             T.wrote = turned(T.kind, T.orig, 10.0); T.cam_before = RD16(CAM_COPY + 18); wr_val(T.kind, T.at, T.wrote); T.wait = 10;

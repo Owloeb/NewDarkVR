@@ -52,3 +52,11 @@ from it each frame.
 **A shot fired right after that write lands 10 degrees to the left** (confirmed by Owen over several retests): the
 projectile is aimed with this body heading. So controller aim horizontally = write this heading at the moment of the
 shot. Pitch is stored somewhere else (the body facing has none); `NDVR_HUNT=1` searches for it next.
+
+## Hunt run 1 (NDVR_HUNT=1, 5 shots)
+
+Heading master found again on the third shot (heap 0x01d4f904 that run). Pitch: 88 places held the pitch at the first
+shot, 10 after the second; still in: global copies 0x8cdb82, 0x93a066, 0x93cfb6, 0x93d44a, the camera object +0x16,
+and heap 0x01998a22, 0x01d4fab2, 0x01d4fac8, 0x01d4fade (0x1ae past the heading master, 0x16 apart: per-submodel
+facings of the physics model), 0x023a61c6. The two tested (0x8cdb82, 0x93a066) are rebuilt. Recoil moves the view
+pitch about -6 degrees, so "the view turned" now means +6..+14 for our +10, and heap entries are tested first.
