@@ -88,3 +88,14 @@ So controller aim = inject `round((target - current - pending) / 32)` counts sid
 with `pending` = counts sent in the last 2 frames. Shots, flash and gun follow by construction. Granularity is 0.18 /
 0.26 degrees (3 / 5 cm at 10 m); the in-game mouse sensitivity setting changes the scale, so measure it at start-up
 (one known nudge) rather than hard-coding it. Pitch limits not measured yet.
+
+## Headset HUD, first impressions (Owen, Quest 3)
+
+- Controller aim through mouse look: follows the hand as it should.
+- Flat HUD at 1.1 m: too small, boxy, did not follow the head. Now a curved helmet-style panel following the head.
+- Curved HUD at 80 degrees: the top console reads perfectly; health and ammo in the corners were too far out to read.
+  In play the HUD is now cut into three strips with the outer ones pulled 12 degrees in and 6 up (left edge at 28
+  instead of 40 degrees).
+- The target brackets / health bar around an enemy are drawn by the game for its own camera, which now points where
+  the gun points, not where the head looks, so on the head-following panel they sit off the enemy. A fix would pick
+  those draws out of the HUD and place them in 3D along the engine camera (like the gun model); not done yet.

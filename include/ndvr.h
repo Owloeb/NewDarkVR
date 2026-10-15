@@ -126,6 +126,16 @@ void        ndvr_blit_eye(int eye, uint32_t src_fbo, int src_w, int src_h, int f
  * ndvr_bind_eye) shows only the panel, for menus. Applies to one frame. */
 void        ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int opaque, const ndvr_pose *pose,
                               float width_m, float height_m, float radius_m, int hole_px, int cursor_x, int cursor_y);
+/* The same, with the image cut into vertical strips (columns x .. x+w) that are placed separately, e.g. to pull the
+ * corners of a HUD towards the centre of view. The image is copied once; each part is one layer. */
+#define NDVR_PANEL_MAX_PARTS 4
+typedef struct ndvr_panel_part {
+    int x, w;                        /* columns of the image this part shows */
+    ndvr_pose pose;                  /* as for ndvr_panel_submit */
+    float width_m, height_m, radius_m;
+} ndvr_panel_part;
+void        ndvr_panel_submit_parts(uint32_t src_fbo, int src_w, int src_h, int flip_y, int opaque, int hole_px,
+                                    int cursor_x, int cursor_y, const ndvr_panel_part *parts, int nparts);
 /* 1 if the runtime supports curved panels (XR_KHR_composition_layer_cylinder). */
 int         ndvr_has_curved_panels(void);
 

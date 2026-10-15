@@ -49,6 +49,9 @@
  *   NDVR_HUD_DIST    its distance in metres (default 1.2)
  *   NDVR_HUD_FOLLOW  how fast it follows your head per frame, 0..1 (default 0.1; 1 = fixed to the head, 0 = stays put)
  *   NDVR_HUD_CROSSHAIR  1 to keep the game's crosshair in the HUD
+ *   NDVR_HUD_PULL / NDVR_HUD_LIFT   in play, the HUD's left and right edges (health, ammo) are moved this many degrees
+ *                    in towards the middle / up (default 12 / 6)
+ *   NDVR_HUD_SPLIT   how much of each side moves, as a fraction of the HUD's width (default 0.21; 0 = keep it whole)
  * Run with SS2PORT_NOVSYNC=1 so the desktop window does not pace the headset. */
 #ifdef _WIN32
 #include <stdio.h>
@@ -106,7 +109,7 @@ static ndvr_frame fr; static int fr_ok;
 static int ref_valid, was_focused; static double ref_yaw; static V3 ref_pos; static uint32_t prev_btn;
 static void init_env(void);
 /* controls (see the header) */
-static int hand_dom = 1, aim_on = 1, hud_crosshair; static double aim_uh = 32, aim_uv = 48, snap_deg = 30, hud_radius = 1.2, hud_angle = 80, hud_follow = 0.1;
+static int hand_dom = 1, aim_on = 1, hud_crosshair; static double aim_uh = 32, aim_uv = 48, snap_deg = 30, hud_radius = 1.2, hud_angle = 80, hud_follow = 0.1, hud_split = 0.21, hud_pull = 12, hud_lift = 6;
 static double body_yaw; static int body_valid, snap_armed = 1;   /* the body's facing in the game: snap turn; the engine's own heading follows the gun */
 static int pend_h[2], pend_v[2];                                  /* aim: heading / pitch units sent as mouse motion in the last two frames */
 static ndvr_pose panel_pose; static int panel_valid; static double pan_yaw, pan_pitch; static V3 pan_pos; static int pan_curved;
@@ -128,7 +131,7 @@ static void rt_init(void *a) {
 static void rt_begin(void *a) { (void)a; fr_ok = ndvr_begin_frame(&fr); }
 
 typedef struct { ndvr_pose pose[2]; ndvr_fov fov[2]; int w[2], h[2]; int mirror; PlatTexture *tex[2]; int flip; int rendered;
-                 int panel; PlatTexture *ptex; ndvr_pose ppose; float pw, ph, radius; int hole, cx, cy; } Submit;   /* panel: 0 none, 1 HUD texture, 2 back buffer */
+                 int panel; PlatTexture *ptex; int hole, cx, cy, nparts; ndvr_panel_part part[3]; } Submit;   /* panel: 0 none, 1 HUD texture, 2 back buffer */
 static void rt_submit(void *data, PlatDrawFn draw) {
     Submit *s = data; (void)draw;
     if (s->rendered) {
@@ -140,7 +143,7 @@ static void rt_submit(void *data, PlatDrawFn draw) {
     }
     if (s->panel) {
         int w, h; unsigned fbo = s->panel == 1 ? vr_gl_tex_fbo(s->ptex, &w, &h) : vr_gl_bb_fbo(&w, &h);
-        ndvr_panel_submit(fbo, w, h, s->flip, s->panel == 2, &s->ppose, s->pw, s->ph, s->radius, s->hole, s->cx, s->cy);
+        ndvr_panel_submit_parts(fbo, w, h, s->flip, s->panel == 2, s->hole, s->cx, s->cy, s->part, s->nparts);
     }
     ndvr_end_frame();
 }
@@ -168,7 +171,8 @@ static void init_env(void) {
     hand_dom = 1; { const char *h = getenv("NDVR_HAND"); if (h && (*h == 'l' || *h == 'L')) hand_dom = 0; }
     aim_on = envi("NDVR_AIM", 1); aim_uh = envd("NDVR_AIM_UNITS_H", 32); aim_uv = envd("NDVR_AIM_UNITS_V", 48);
     snap_deg = envd("NDVR_SNAP", 30); hud_radius = envd("NDVR_HUD_DIST", 1.2); hud_angle = envd("NDVR_HUD_ANGLE", 80); hud_follow = envd("NDVR_HUD_FOLLOW", 0.1);
-    hud_crosshair = envi("NDVR_HUD_CROSSHAIR", 0);
+    hud_crosshair = envi("NDVR_HUD_CROSSHAIR", 0); hud_split = envd("NDVR_HUD_SPLIT", 0.21); hud_pull = envd("NDVR_HUD_PULL", 12); hud_lift = envd("NDVR_HUD_LIFT", 6);
+    if (hud_split < 0.05 || hud_split > 0.45) hud_split = 0;
     if (hud_radius < 0.3) hud_radius = 0.3; if (hud_angle < 20) hud_angle = 20; if (hud_angle > 170) hud_angle = 170; if (hud_follow < 0) hud_follow = 0; if (hud_follow > 1) hud_follow = 1;
     if (mode == 2) port_debug("NDVR: %s hand, aim %s (%.0f / %.0f units per count), snap turn %.0f deg, HUD %.0f deg wide at %.2f m, follow %.2f, crosshair %s",
         hand_dom ? "right" : "left", aim_on ? "on" : "off", aim_uh, aim_uv, snap_deg, hud_angle, hud_radius, hud_follow, hud_crosshair ? "shown" : "hidden");
@@ -303,7 +307,24 @@ void vr_frame_present(void) {
     double pw, ph; panel_size(src_w, src_h, &pw, &ph);
     controls(st == 1, pw, ph);
     if (s.panel && panel_valid) {
-        s.ppose = panel_pose; s.pw = (float)pw; s.ph = (float)ph; s.radius = pan_curved ? (float)hud_radius : 0;
+        ndvr_panel_part *pp = s.part; float r = pan_curved ? (float)hud_radius : 0;
+        if (s.panel == 1 && pan_curved && hud_split > 0 && vr_input_captured()) {
+            /* In play the HUD's corners (health, ammo) are pulled in towards the middle of the view: three strips, the
+             * middle one where it belongs, the outer ones turned in by NDVR_HUD_PULL and raised by NDVR_HUD_LIFT degrees. */
+            int sw = (int)(src_w * hud_split + 0.5); double side = pw * hud_split, mid = pw - 2 * side;
+            double off = (mid / 2 + side / 2) / hud_radius - hud_pull * PI_D / 180.0, lift = hud_lift * PI_D / 180.0;
+            for (int k = 0; k < 3; k++) {
+                double yaw = k == 0 ? off : k == 2 ? -off : 0, pit = k == 1 ? 0 : lift;   /* left of the image = turned left (+yaw) */
+                ndvr_quat qy = { 0, (float)sin(yaw / 2), 0, (float)cos(yaw / 2) }, qx = { (float)sin(pit / 2), 0, 0, (float)cos(pit / 2) };
+                pp[k].pose = panel_pose; pp[k].pose.orientation = qmul(qmul(panel_pose.orientation, qy), qx);
+                pp[k].x = k == 0 ? 0 : k == 1 ? sw : src_w - sw; pp[k].w = k == 1 ? src_w - 2 * sw : sw;
+                pp[k].width_m = (float)(k == 1 ? mid : side); pp[k].height_m = (float)ph; pp[k].radius_m = r;
+            }
+            s.nparts = 3;
+        } else {
+            pp[0].pose = panel_pose; pp[0].x = 0; pp[0].w = src_w; pp[0].width_m = (float)pw; pp[0].height_m = (float)ph; pp[0].radius_m = r;
+            s.nparts = 1;
+        }
         s.hole = s.panel == 1 && !hud_crosshair ? (src_w * 28 + 1279) / 1280 : 0;   /* the game's crosshair (16 px at 1280) points the head's way: hide it */
         s.cx = ptr_u >= 0 ? (int)(ptr_u * src_w) : -1; s.cy = ptr_v >= 0 ? (int)(ptr_v * src_h) : -1;
     } else s.panel = 0;

@@ -1007,8 +1007,8 @@ static struct {
     GLuint *tex, *fbo;
     int used;                  /* submitted this frame */
     int opaque;
-    XrPosef pose;
-    float wm, hm, radius;
+    int nparts;
+    struct { int x, w; XrPosef pose; float wm, hm, radius; } part[NDVR_PANEL_MAX_PARTS];
 } g_panel;
 
 static void destroyPanel(void)
@@ -1074,6 +1074,16 @@ int ndvr_has_curved_panels(void) { return g_cylinder; }
 void ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int opaque, const ndvr_pose *pose,
                        float width_m, float height_m, float radius_m, int hole_px, int cursor_x, int cursor_y)
 {
+    ndvr_panel_part p;
+    if (!pose) return;
+    memset(&p, 0, sizeof p);
+    p.x = 0; p.w = src_w; p.pose = *pose; p.width_m = width_m; p.height_m = height_m; p.radius_m = radius_m;
+    ndvr_panel_submit_parts(src_fbo, src_w, src_h, flip_y, opaque, hole_px, cursor_x, cursor_y, &p, 1);
+}
+
+void ndvr_panel_submit_parts(uint32_t src_fbo, int src_w, int src_h, int flip_y, int opaque, int hole_px, int cursor_x,
+                             int cursor_y, const ndvr_panel_part *parts, int nparts)
+{
     XrSwapchainImageAcquireInfo ai;
     XrSwapchainImageWaitInfo wait;
     XrSwapchainImageReleaseInfo ri;
@@ -1082,8 +1092,10 @@ void ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int o
     GLboolean sc;
     int W, H;
 
-    if (!g_framRendered || src_w <= 0 || src_h <= 0 || !pose)
+    int k;
+    if (!g_framRendered || src_w <= 0 || src_h <= 0 || !parts || nparts <= 0)
         return;
+    if (nparts > NDVR_PANEL_MAX_PARTS) nparts = NDVR_PANEL_MAX_PARTS;
     if (!g_panel.sc || g_panel.w != (uint32_t)src_w || g_panel.h != (uint32_t)src_h)
         if (!createPanel((uint32_t)src_w, (uint32_t)src_h))
             return;
@@ -1131,10 +1143,18 @@ void ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int o
     ri.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
     fn.xrReleaseSwapchainImage(g_panel.sc, &ri);
 
-    g_panel.pose.orientation.x = pose->orientation.x; g_panel.pose.orientation.y = pose->orientation.y;
-    g_panel.pose.orientation.z = pose->orientation.z; g_panel.pose.orientation.w = pose->orientation.w;
-    g_panel.pose.position.x = pose->position.x; g_panel.pose.position.y = pose->position.y; g_panel.pose.position.z = pose->position.z;
-    g_panel.wm = width_m; g_panel.hm = height_m; g_panel.radius = g_cylinder && radius_m > 0 ? radius_m : 0; g_panel.opaque = opaque; g_panel.used = 1;
+    for (k = 0; k < nparts; ++k) {
+        const ndvr_pose *ps = &parts[k].pose;
+        g_panel.part[k].x = parts[k].x < 0 ? 0 : parts[k].x > W ? W : parts[k].x;
+        g_panel.part[k].w = parts[k].w <= 0 || g_panel.part[k].x + parts[k].w > W ? W - g_panel.part[k].x : parts[k].w;
+        g_panel.part[k].pose.orientation.x = ps->orientation.x; g_panel.part[k].pose.orientation.y = ps->orientation.y;
+        g_panel.part[k].pose.orientation.z = ps->orientation.z; g_panel.part[k].pose.orientation.w = ps->orientation.w;
+        g_panel.part[k].pose.position.x = ps->position.x; g_panel.part[k].pose.position.y = ps->position.y;
+        g_panel.part[k].pose.position.z = ps->position.z;
+        g_panel.part[k].wm = parts[k].width_m; g_panel.part[k].hm = parts[k].height_m;
+        g_panel.part[k].radius = g_cylinder && parts[k].radius_m > 0 ? parts[k].radius_m : 0;
+    }
+    g_panel.nparts = nparts; g_panel.opaque = opaque; g_panel.used = 1;
 }
 
 
@@ -1143,10 +1163,11 @@ void ndvr_end_frame(void)
     XrFrameEndInfo ei;
     XrCompositionLayerProjectionView pv[2];
     XrCompositionLayerProjection proj;
-    XrCompositionLayerQuad quad;
-    XrCompositionLayerCylinderKHR cyl;
-    const XrCompositionLayerBaseHeader *layers[2];
+    XrCompositionLayerQuad quad[NDVR_PANEL_MAX_PARTS];
+    XrCompositionLayerCylinderKHR cyl[NDVR_PANEL_MAX_PARTS];
+    const XrCompositionLayerBaseHeader *layers[1 + NDVR_PANEL_MAX_PARTS];
     uint32_t nl = 0;
+    int k;
     uint32_t e;
 
     if (!g_frameBegun)
@@ -1195,33 +1216,40 @@ void ndvr_end_frame(void)
         proj.views = pv;
         if (g_eyesWritten)                       /* menus: no 3D view this frame, only the panel */
             layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
-        if (g_panel.used && g_panel.radius > 0) {
-            memset(&cyl, 0, sizeof cyl);
-            cyl.type = XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR;
-            cyl.layerFlags = g_panel.opaque ? 0 : (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
-            cyl.space = g_local;
-            cyl.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-            cyl.subImage.swapchain = g_panel.sc;
-            cyl.subImage.imageRect.extent.width = (int32_t)g_panel.w;
-            cyl.subImage.imageRect.extent.height = (int32_t)g_panel.h;
-            cyl.pose = g_panel.pose;                 /* the cylinder's centre (the viewer); the image is centred on its -Z */
-            cyl.radius = g_panel.radius;
-            cyl.centralAngle = g_panel.wm / g_panel.radius;
-            cyl.aspectRatio = g_panel.wm / g_panel.hm;
-            layers[nl++] = (const XrCompositionLayerBaseHeader *)&cyl;
-        } else if (g_panel.used) {
-            memset(&quad, 0, sizeof quad);
-            quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
-            quad.layerFlags = g_panel.opaque ? 0 : (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
-            quad.space = g_local;
-            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-            quad.subImage.swapchain = g_panel.sc;
-            quad.subImage.imageRect.extent.width = (int32_t)g_panel.w;
-            quad.subImage.imageRect.extent.height = (int32_t)g_panel.h;
-            quad.pose = g_panel.pose;
-            quad.size.width = g_panel.wm;
-            quad.size.height = g_panel.hm;
-            layers[nl++] = (const XrCompositionLayerBaseHeader *)&quad;
+        for (k = 0; g_panel.used && k < g_panel.nparts; ++k) {
+            XrCompositionLayerFlags fl = g_panel.opaque ? 0 : (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
+            XrSwapchainSubImage sub;
+            memset(&sub, 0, sizeof sub);
+            sub.swapchain = g_panel.sc;
+            sub.imageRect.offset.x = g_panel.part[k].x;
+            sub.imageRect.extent.width = g_panel.part[k].w;
+            sub.imageRect.extent.height = (int32_t)g_panel.h;
+            if (g_panel.part[k].radius > 0) {
+                XrCompositionLayerCylinderKHR *c = &cyl[k];
+                memset(c, 0, sizeof *c);
+                c->type = XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR;
+                c->layerFlags = fl;
+                c->space = g_local;
+                c->eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                c->subImage = sub;
+                c->pose = g_panel.part[k].pose;      /* the cylinder's centre (the viewer); the image is centred on its -Z */
+                c->radius = g_panel.part[k].radius;
+                c->centralAngle = g_panel.part[k].wm / g_panel.part[k].radius;
+                c->aspectRatio = g_panel.part[k].wm / g_panel.part[k].hm;
+                layers[nl++] = (const XrCompositionLayerBaseHeader *)c;
+            } else {
+                XrCompositionLayerQuad *q = &quad[k];
+                memset(q, 0, sizeof *q);
+                q->type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+                q->layerFlags = fl;
+                q->space = g_local;
+                q->eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                q->subImage = sub;
+                q->pose = g_panel.part[k].pose;
+                q->size.width = g_panel.part[k].wm;
+                q->size.height = g_panel.part[k].hm;
+                layers[nl++] = (const XrCompositionLayerBaseHeader *)q;
+            }
         }
         ei.layerCount = nl;
         ei.layers = nl ? layers : NULL;
