@@ -128,3 +128,9 @@ with the camera state the last scene render left. In headset mode that was the r
 desktop back buffer: the broken pistol on the monitor and nothing in the headset. Now: after the eyes one more
 scene render from the engine's own camera (zoom 0.5, nothing drawn) sets that camera; the weapon draws that follow, up
 to EndScene, are kept instead of drawn; at Present they are moved to the hand and drawn into each eye's image.
+
+VR probe run (d479969 + probe): the engine batches its draws. A scene render's weapon polygons, queued after its
+depth-only clear, reach the device only at the next flush: the next render's first clear, or EndScene. In headset
+mode eye 0's weapon arrived in eye 1's image just before eye 1's clear, eye 1's in the camera pass, and the camera
+pass's at EndScene after the hook had returned. That last batch is the weapon to keep: mode 3 now starts in the
+weapon phase when the camera pass did its depth clear, and keeps everything up to EndScene.
