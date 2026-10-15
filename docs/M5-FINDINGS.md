@@ -134,3 +134,11 @@ depth-only clear, reach the device only at the next flush: the next render's fir
 mode eye 0's weapon arrived in eye 1's image just before eye 1's clear, eye 1's in the camera pass, and the camera
 pass's at EndScene after the hook had returned. That last batch is the weapon to keep: mode 3 now starts in the
 weapon phase when the camera pass did its depth clear, and keeps everything up to EndScene.
+
+Run of e37e2d4 (Owen): the weapon is in the hand, but huge and missing half its model. The first-person model is
+built for one fixed view: whatever the game never shows from that view is not modelled, and whatever it does not draw
+from that view (back faces, the parts clipped at the screen edge and near plane) never reaches us. Moving the captured
+triangles cannot bring that back, and a better first-person model does not help either, because the view it is drawn
+from is the same every frame. Plan: draw the weapon ourselves in each eye, from the game's own model files
+read at run time (the weapon's world model is complete; replacement packs such as Tacticool would then work as they
+are), at real scale. The capture path stays as the fallback (NDVR_GUN_SCALE to shrink it).

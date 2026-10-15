@@ -69,7 +69,8 @@ move it in the hand. Walking is still on the keyboard, relative to where the gun
 top of `port-glue/vr_stereo.c`. `python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled --uninstall` puts your
 checkout back to vanilla.
 
-**Next up:** enemy target brackets placed in 3D (they are drawn for the gun's camera, so on the head-following HUD
+**Next up:** the weapon drawn from the game's own (complete) model files in the hand, instead of the first-person model
+(which is huge and half missing up close), then enemy target brackets placed in 3D (they are drawn for the gun's camera, so on the head-following HUD
 they sit off the enemy), then thumbstick walking relative to your body.
 
 **Probe build (HUD and weapon):** `python3 tools/install_into_port.py <NewDarkRecompiled checkout> --probe`, rebuild with `--fastpaths`, then run
