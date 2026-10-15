@@ -171,3 +171,13 @@ all of it, so the missing half of the vanilla pistol really is not modelled. Mos
 one view; the fusion cannon and laser are close to complete. Tacticool's are far more detailed (the pistol 1033).
 Plan for originals: draw both sides of every polygon (an open shell then looks solid from most angles instead of
 see-through), and per weapon fall back to the world model (more complete, e.g. ATEK_W 17% open) with the arm hidden.
+
+### Plan agreed with Owen: floor models, the game's motion
+
+Tacticool does not cover every weapon, so the originals have to work: draw each weapon's world (floor) model in the
+hand, both sides of every polygon, and keep the game's recoil and reload motion by measuring it from the captured
+first-person draw: each frame, find the rigid move (rotation + offset, least squares over the same vertices) between
+the captured weapon now and its measured rest pose, and apply that move to the floor model. Which weapon is out:
+match the captured draw (vertex / triangle counts, box shape) against the *_h.bin models read from the install at
+start-up, then load the matching *_w.bin. Grip point and barrel axis per world model: from its shape (the long axis
+is the barrel), with per-weapon overrides.
