@@ -64,14 +64,16 @@ and videos use it too; it holds still while a cursor is up). The gun
 hand (`$env:NDVR_HAND="left"` for left-handed) aims: the game's mouse look follows the controller, so shots go where
 it points. Trigger = fire / click, A or X = use (right mouse button), B or Y = Tab (inventory; the hand then points
 at the panel with a cursor), thumbstick left/right = snap turn, left menu button = recentre.
-The game's own first-person weapon is drawn in the gun hand (mirrored for the left hand); `NDVR_GUN_X/Y/Z` (cm)
-move it in the hand. Walking is still on the keyboard, relative to where the gun points. All tuning variables are listed at the
+The weapon in your hand is the game's own floor (world) model, which is modelled all the way round, drawn double-sided
+and moved with the game's recoil and reload dip; shots are zeroed to cross its barrel line 10 m out (`NDVR_ZERO`).
+It needs a one-time extraction from your install (nothing is copied from anywhere else):
+`python3 ~/NewDarkVR/tools/extract_weapons.py "/mnt/n/System Shock 2"` writes `vr/weapons.vrw` into the game folder.
+Without that file, or for a weapon it doesn't recognise, the first-person model is shown instead. `NDVR_GUN_X/Y/Z` (cm)
+move it in the hand, `NDVR_GUN_SCALE` sizes it, `NDVR_GUN_ONTOP=1` stops walls hiding it. Walking is still on the keyboard, relative to where the gun points. All tuning variables are listed at the
 top of `port-glue/vr_stereo.c`. `python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled --uninstall` puts your
 checkout back to vanilla.
 
-**Next up:** the weapon drawn from the game's own (complete) model files in the hand, instead of the first-person model
-(which is huge and half missing up close), then enemy target brackets placed in 3D (they are drawn for the gun's camera, so on the head-following HUD
-they sit off the enemy), then thumbstick walking relative to your body.
+**Next up:** enemy brackets drawn in 3D at the target, thumbstick walking relative to the body.
 
 **Probe build (HUD and weapon):** `python3 tools/install_into_port.py <NewDarkRecompiled checkout> --probe`, rebuild with `--fastpaths`, then run
 without the VR flags: `$env:NDVR_PROBE=1; $env:SS2PORT_NOVSYNC=1; .\ss2port.exe --windowed SS2.exe`. Walk around in a level, fire the

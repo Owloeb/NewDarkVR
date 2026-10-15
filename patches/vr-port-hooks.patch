@@ -37,7 +37,7 @@ index ba13283..f90af07 100644
 +extern int vr_scene_hook(CPU *c);
 +int fp_00601430(CPU *c) { return vr_scene_hook(c); }
 diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
-index 413e0da..b3570cd 100644
+index 413e0da..eafce69 100644
 --- a/port/dx/d3d9.c
 +++ b/port/dx/d3d9.c
 @@ -151,11 +151,21 @@ static void default_state(State *s, int zenable) {
@@ -63,7 +63,7 @@ index 413e0da..b3570cd 100644
  static void target_size(Device *d, uint32_t *w, uint32_t *h) {
      Res *r = R(d->rt); if (!r || r->backbuffer) { *w = d->bb_w; *h = d->bb_h; return; }
      if (r->container) { Res *t = R(r->container); *w = level_w(t, r->level); *h = level_h(t, r->level); } else { *w = r->w; *h = r->h; }
-@@ -410,9 +420,97 @@ static void deferred_draw(void *data, PlatDrawFn submit) {             /* on the
+@@ -410,9 +420,106 @@ static void deferred_draw(void *data, PlatDrawFn submit) {             /* on the
      for (int i = 0; i < h->nidx; i++) { uint16_t r = ix[i]; if (!done[r]) { done[r] = 1; vertex(&h->s, &h->L, &h->x, raw + (size_t)r * h->stride, &out[r]); } }
      submit(h->prim, out, (int)h->span, ix, h->nidx, &h->ps);
  }
@@ -89,13 +89,18 @@ index 413e0da..b3570cd 100644
 + *   3. vr_d3d_gun_replay_eye, at the end of the frame: per eye, the kept draws are moved by a 3x4 matrix (engine camera
 + *      space to eye camera space: the hand), projected for the eye and drawn into the eye's image after a depth clear. */
 +int vr_gun_nv, vr_gun_near, vr_gun_draws; float vr_gun_bmin[3], vr_gun_bmax[3];
++/* per kept draw: texture size and triangle count (which weapon it is); over all its vertices: sums for the centroid
++ * and covariance in camera space (how it moves) and the mean vertex colour (how the game lights it) */
++#define VR_GUN_MAXD 32
++int vr_gun_dtw[VR_GUN_MAXD], vr_gun_dth[VR_GUN_MAXD], vr_gun_dtris[VR_GUN_MAXD]; double vr_gun_mom[10], vr_gun_rgb[4];
 +static int vr_eye_active, vr_vm_phase, vr_gun_mode, vr_gun_zseen;   /* mode 0 normal, 1 camera pass (draws nothing), 3 keeping the weapon */
 +static float vr_gun_capf, vr_gun_cx, vr_gun_cy;
 +static uint8_t *vr_gun_buf; static size_t vr_gun_len, vr_gun_cap;   /* kept draws: [size_t total][blob] ... */
-+static void vr_gun_keep(const uint8_t *blob, size_t total, const Deferred *h, int pos) {
++static void vr_gun_keep(const uint8_t *blob, size_t total, const Deferred *h, int pos, int tw, int th, int dif) {
 +    if (vr_gun_len + total + 16 > vr_gun_cap) { vr_gun_cap = (vr_gun_len + total + 16) * 2; vr_gun_buf = realloc(vr_gun_buf, vr_gun_cap); }
 +    memcpy(vr_gun_buf + vr_gun_len, &total, sizeof total); memcpy(vr_gun_buf + vr_gun_len + sizeof total, blob, total);
 +    vr_gun_len += (sizeof total + total + 7) & ~(size_t)7;
++    if (vr_gun_draws < VR_GUN_MAXD) { vr_gun_dtw[vr_gun_draws] = tw; vr_gun_dth[vr_gun_draws] = th; vr_gun_dtris[vr_gun_draws] = h->nidx / 3; }
 +    vr_gun_draws++;
 +    const uint8_t *raw = (const uint8_t *)(h + 1);
 +    for (uint32_t i = 0; i < h->span; i++) {
@@ -103,6 +108,9 @@ index 413e0da..b3570cd 100644
 +        float Z = 1.0f / v[3], X = (v[0] - vr_gun_cx) / vr_gun_capf * Z, Y = (v[1] - vr_gun_cy) / vr_gun_capf * Z, q[3] = { X, Y, Z };
 +        for (int k = 0; k < 3; k++) { if (q[k] < vr_gun_bmin[k]) vr_gun_bmin[k] = q[k]; if (q[k] > vr_gun_bmax[k]) vr_gun_bmax[k] = q[k]; }
 +        vr_gun_nv++;
++        double *mo = vr_gun_mom; mo[0] += 1; mo[1] += X; mo[2] += Y; mo[3] += Z;
++        mo[4] += (double)X * X; mo[5] += (double)Y * Y; mo[6] += (double)Z * Z; mo[7] += (double)X * Y; mo[8] += (double)X * Z; mo[9] += (double)Y * Z;
++        if (dif >= 0) { uint32_t cl; memcpy(&cl, raw + (size_t)i * h->stride + dif, 4); vr_gun_rgb[0] += (cl >> 16) & 255; vr_gun_rgb[1] += (cl >> 8) & 255; vr_gun_rgb[2] += cl & 255; vr_gun_rgb[3] += 1; }
 +    }
 +}
 +void vr_d3d_gun_pass(int mode, float f, float cx, float cy) {
@@ -112,7 +120,8 @@ index 413e0da..b3570cd 100644
 +    if (mode == 1) vr_gun_zseen = 0;
 +    vr_gun_mode = mode;
 +    if (mode == 3) { vr_gun_len = 0; vr_gun_capf = f; vr_gun_cx = cx; vr_gun_cy = cy;
-+                     vr_gun_nv = vr_gun_near = vr_gun_draws = 0; for (int k = 0; k < 3; k++) { vr_gun_bmin[k] = 1e30f; vr_gun_bmax[k] = -1e30f; } }
++                     vr_gun_nv = vr_gun_near = vr_gun_draws = 0; for (int k = 0; k < 3; k++) { vr_gun_bmin[k] = 1e30f; vr_gun_bmax[k] = -1e30f; }
++                     memset(vr_gun_mom, 0, sizeof vr_gun_mom); memset(vr_gun_rgb, 0, sizeof vr_gun_rgb); }
 +}
 +void vr_d3d_gun_replay_eye(PlatTexture *t, float ox, float oy, float kx, float ky, int W, int H, const float *m, int mirror, float f) {
 +    if (vr_gun_mode == 3) vr_gun_mode = 0;
@@ -161,7 +170,7 @@ index 413e0da..b3570cd 100644
      Layout L; if (!current_layout(d, &L)) return;
      if (!stride) stride = (uint32_t)L.stride;
      if (!d->in_scene) { static int w; if (!w++) port_debug("Direct3D: draw outside BeginScene/EndScene"); }
-@@ -426,6 +524,8 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+@@ -426,6 +533,8 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
      }
      if (idx && num_vertices && hi - lo + 1 > num_vertices + min_index) { /* trust the indices */ }
      uint32_t span = hi - lo + 1;
@@ -170,18 +179,22 @@ index 413e0da..b3570cd 100644
      size_t maxidx = (size_t)nseq * 3 + 6;
      if (d->icap < (int)maxidx) { d->icap = (int)maxidx; d->ibuf = realloc(d->ibuf, (size_t)d->icap * sizeof *d->ibuf); }
      VState vs; vstate_of(&d->st, &vs);
-@@ -438,7 +538,10 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+@@ -438,7 +547,14 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
          memcpy(h + 1, GP(vbase + lo * stride), (size_t)span * stride);
          uint16_t *ix = (uint16_t *)((uint8_t *)(h + 1) + vbytes); for (int i = 0; i < n; i++) ix[i] = (uint16_t)e32[i];
          free(e32);
-+        if (vr_gun_mode == 3 && vr_vm_phase) { if (L.rhw) vr_gun_keep(blob, total, h, L.pos); return; }   /* NewDarkVR: keep the weapon */
++        if (vr_gun_mode == 3 && vr_vm_phase) {                        /* NewDarkVR: keep the weapon */
++            Res *t0 = R(d->st.tex[0]);
++            if (L.rhw) vr_gun_keep(blob, total, h, L.pos, t0 ? (int)t0->w : 0, t0 ? (int)t0->h : 0, L.diffuse);
++            return;
++        }
          plat_gfx_deferred(deferred_draw, blob, total);
 +    } else if (vr_gun_mode == 3 && vr_vm_phase) {                     /* NewDarkVR: the weapon is only kept */
 +        return;
      } else if (span <= 65535) {                                       /* some vertex outside guest memory: per vertex, here */
          if (d->vcap < (int)span) { d->vcap = (int)span; d->vbuf = realloc(d->vbuf, (size_t)d->vcap * sizeof *d->vbuf); }
          uint8_t *used = calloc(span, 1);
-@@ -789,6 +892,7 @@ static void dev_reset(CPU *c, ComObj *s) {
+@@ -789,6 +905,7 @@ static void dev_reset(CPU *c, ComObj *s) {
  }
  static void dev_present(CPU *c, ComObj *s) {
      Device *d = DEV(s); (void)c;
@@ -189,7 +202,7 @@ index 413e0da..b3570cd 100644
      plat_gfx_present(); port_frame_presented(); plat_gfx_begin_frame(); plat_gfx_set_target(surface_target(R(d->rt))); apply_viewport(d);
      c->eax = 0;
  }
-@@ -892,10 +996,13 @@ static void dev_setrt(CPU *c, ComObj *s) {
+@@ -892,10 +1009,13 @@ static void dev_setrt(CPU *c, ComObj *s) {
  static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->rt) { OUTP(2, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->rt); OUTP(2, d->rt->guest); RET(0); }
  static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
  static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
@@ -205,7 +218,7 @@ index 413e0da..b3570cd 100644
      int color = (flags & 1) != 0, depth = (flags & 2) && d->ds, sten = (flags & 4) && d->ds;
      if (!n || !rects) { plat_gfx_clear(color, A(4), depth, z, sten, A(6)); RET(0); return; }
      for (uint32_t i = 0; i < n; i++) { uint32_t r = rects + 16 * i; plat_gfx_scissor(1, (int32_t)RD32(r), (int32_t)RD32(r + 4), (int32_t)(RD32(r + 8) - RD32(r)), (int32_t)(RD32(r + 12) - RD32(r + 4))); plat_gfx_clear(color, A(4), depth, z, sten, A(6)); }
-@@ -1068,3 +1175,18 @@ const ShimDef d3d9_shims[] = {
+@@ -1068,3 +1188,18 @@ const ShimDef d3d9_shims[] = {
      { "D3DXLoadSurfaceFromSurface", sh_D3DXLoadSurfaceFromSurface, STD(8) },
      { 0, 0, 0 }
  };

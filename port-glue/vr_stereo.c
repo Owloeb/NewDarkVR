@@ -55,6 +55,10 @@
  *   NDVR_GUN         0 to leave the weapon where the game draws it
  *   NDVR_GUN_X / NDVR_GUN_Y / NDVR_GUN_Z   move the weapon in the hand, in cm (right, up, forward; default 0)
  *   NDVR_GUN_SCALE   weapon size (default 1)
+ *   NDVR_GUN_WORLD   0 to show the game's first-person model instead of the world model (needs vr/weapons.vrw from
+ *                    tools/extract_weapons.py; without it the first-person model is shown)
+ *   NDVR_ZERO        metres at which shots cross the world model's barrel line (default 10; 0 = along the controller)
+ *   NDVR_GUN_ONTOP   1 to draw the weapon over walls instead of letting them hide it
  *   NDVR_HUD_SPLIT   how much of each side moves, as a fraction of the HUD's width (default 0.21; 0 = keep it whole)
  * Run with SS2PORT_NOVSYNC=1 so the desktop window does not pace the headset. */
 #ifdef _WIN32
@@ -132,6 +136,9 @@ extern int vr_gun_nv, vr_gun_near, vr_gun_draws; extern float vr_gun_bmin[3], vr
 extern void vr_d3d_gun_pass(int mode, float f, float cx, float cy);
 extern void vr_d3d_gun_replay_eye(PlatTexture *t, float ox, float oy, float kx, float ky, int W, int H, const float *m, int mirror, float f);
 static float eye_map[2][4]; static float gun_f_eye; static int gun_W, gun_H;
+#define VR_GUN_MAXD 32
+extern int vr_gun_dtw[VR_GUN_MAXD], vr_gun_dth[VR_GUN_MAXD], vr_gun_dtris[VR_GUN_MAXD]; extern double vr_gun_mom[10], vr_gun_rgb[4];
+static double gun_zero_m = 10; static int gun_ontop, gun_use_world = 1;
 static float gun_m[12]; static int gun_mirror;
 static int gun_enabled = 1, gun_ready, gun_frames, gun_ref_nv, gun_odd; static double gun_scale = 1, gun_off[3], gun_sum[3], gun_g0[3];
 
@@ -186,6 +193,7 @@ static void init_env(void) {
     snap_deg = envd("NDVR_SNAP", 30); hud_radius = envd("NDVR_HUD_DIST", 1.2); hud_angle = envd("NDVR_HUD_ANGLE", 80); hud_follow = envd("NDVR_HUD_FOLLOW", 0.1);
     gun_enabled = envi("NDVR_GUN", 1); gun_scale = envd("NDVR_GUN_SCALE", 1.0);
     gun_off[0] = envd("NDVR_GUN_X", 0); gun_off[1] = envd("NDVR_GUN_Y", 0); gun_off[2] = envd("NDVR_GUN_Z", 0);
+    gun_zero_m = envd("NDVR_ZERO", 10); gun_ontop = envi("NDVR_GUN_ONTOP", 0); gun_use_world = envi("NDVR_GUN_WORLD", 1);
     hud_crosshair = envi("NDVR_HUD_CROSSHAIR", 0); hud_split = envd("NDVR_HUD_SPLIT", 0.21); hud_pull = envd("NDVR_HUD_PULL", 12); hud_lift = envd("NDVR_HUD_LIFT", 6);
     if (hud_split < 0.05 || hud_split > 0.45) hud_split = 0;
     if (hud_radius < 0.3) hud_radius = 0.3; if (hud_angle < 20) hud_angle = 20; if (hud_angle > 170) hud_angle = 170; if (hud_follow < 0) hud_follow = 0; if (hud_follow > 1) hud_follow = 1;
@@ -236,8 +244,10 @@ static void track_update(void) {
 
 /* ---------------------------------------------------------------- the gun hand: aim through mouse look, or a pointer on the panel */
 static int s16i(int v) { v &= 0xFFFF; return v > 32767 ? v - 65536 : v; }
+static int vw_muzzle_aim(const ndvr_hand *hd, V3 *dir);
 static void aim_update(const ndvr_hand *hd) {
     V3 f = qrot(hd->aim.orientation, v3(0, 0, -1));
+    vw_muzzle_aim(hd, &f);                                        /* with a world model in the hand: along its barrel, zeroed */
     double ya = atan2(-f.x, -f.z), pa = asin(f.y < -1 ? -1 : f.y > 1 ? 1 : f.y);
     double th = body_yaw + wrap_pi(ya - ref_yaw), tp = -pa;      /* engine: heading grows to the left, positive pitch looks down */
     int eh = s16i((int)ang16(th) - eng_h - pend_h[0] - pend_h[1]);   /* what is still missing once the motion in flight lands (2 frames) */
@@ -355,6 +365,215 @@ static void gun_measure(void) {                                   /* after the c
     }
 }
 
+/* ---------------------------------------------------------------- the weapon's world model in the hand
+ * tools/extract_weapons.py writes vr/weapons.vrw from the player's own install: per first-person model the texture
+ * size and triangle count of each material, per world (floor) model its triangles in metres, turned so that x is
+ * right, y down, z forward (the barrel), with the grip at the origin, plus the muzzle point and the textures.
+ * Each frame the kept first-person draws (port/dx/d3d9.c) say which weapon is out (their texture sizes and triangle
+ * counts against the first-person models) and how it moves (its centroid and principal axes against its rest pose:
+ * recoil, the reload dip); the matching world model is drawn in the gun hand with that movement, both sides of every
+ * triangle, lit roughly like the game lights the weapon, and depth-tested against the world. */
+typedef struct { char name[16]; uint32_t world, nmat; uint32_t (*mat)[3]; } VwHand;
+typedef struct { char name[16]; float muzzle[3], length; uint32_t nv, nt; float *v; uint16_t *t; } VwWorld;
+typedef struct { char name[32]; uint32_t w, h; uint8_t *rgba; PlatTexture *pt; } VwTex;
+static VwHand *vw_h; static VwWorld *vw_w; static VwTex *vw_t; static uint32_t vw_nh, vw_nw, vw_nt; static int vw_state;   /* 0 not tried, 1 loaded, -1 none */
+static int vw_cur = -1, vw_cand = -1, vw_cand_n;                 /* current world model; a challenger and how many frames it has won */
+static int vw_rest_n; static double vw_rest_c[3], vw_rest_E[9], vw_rest_acc[10];   /* the weapon's rest pose (centroid, axes) */
+static double vw_R[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }, vw_T[3];  /* its movement now (rotation, offset in metres) */
+static float vw_light[3] = { 1, 1, 1 };
+
+static int vw_load(void) {
+    FILE *f = fopen("vr/weapons.vrw", "rb");
+    if (!f) { port_debug("NDVR: no vr/weapons.vrw: run  python3 NewDarkVR/tools/extract_weapons.py \"<game folder>\"  (the weapon stays as the game draws it)"); return -1; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *b = malloc((size_t)n); if (!b || fread(b, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(b); return -1; }
+    fclose(f);
+    size_t o = 8; uint32_t u;
+#define RU32() (o + 4 <= (size_t)n ? (memcpy(&u, b + o, 4), o += 4, u) : (o = (size_t)n + 1, 0u))
+    if (n < 12 || memcmp(b, "NDVW", 4)) { free(b); return -1; }
+    vw_nt = RU32(); vw_t = calloc(vw_nt ? vw_nt : 1, sizeof *vw_t);
+    for (uint32_t i = 0; i < vw_nt && o <= (size_t)n; i++) {
+        if (o + 32 > (size_t)n) { o = (size_t)n + 1; break; }
+        memcpy(vw_t[i].name, b + o, 32); vw_t[i].name[31] = 0; o += 32; vw_t[i].w = RU32(); vw_t[i].h = RU32();
+        size_t sz = (size_t)vw_t[i].w * vw_t[i].h * 4; if (o + sz > (size_t)n) { o = (size_t)n + 1; break; }
+        vw_t[i].rgba = b + o; o += sz;
+    }
+    vw_nh = RU32(); vw_h = calloc(vw_nh ? vw_nh : 1, sizeof *vw_h);
+    for (uint32_t i = 0; i < vw_nh && o <= (size_t)n; i++) {
+        if (o + 16 > (size_t)n) { o = (size_t)n + 1; break; }
+        memcpy(vw_h[i].name, b + o, 16); vw_h[i].name[15] = 0; o += 16; vw_h[i].world = RU32(); vw_h[i].nmat = RU32();
+        if (o + 12ull * vw_h[i].nmat > (size_t)n) { o = (size_t)n + 1; break; }
+        vw_h[i].mat = (uint32_t (*)[3])(void *)(b + o); o += 12ull * vw_h[i].nmat;
+    }
+    vw_nw = RU32(); vw_w = calloc(vw_nw ? vw_nw : 1, sizeof *vw_w);
+    for (uint32_t i = 0; i < vw_nw && o <= (size_t)n; i++) {
+        if (o + 32 > (size_t)n) { o = (size_t)n + 1; break; }
+        memcpy(vw_w[i].name, b + o, 16); vw_w[i].name[15] = 0; o += 16; memcpy(vw_w[i].muzzle, b + o, 12); memcpy(&vw_w[i].length, b + o + 12, 4); o += 16;
+        vw_w[i].nv = RU32(); if (o + 32ull * vw_w[i].nv > (size_t)n) { o = (size_t)n + 1; break; }
+        vw_w[i].v = (float *)(void *)(b + o); o += 32ull * vw_w[i].nv;
+        vw_w[i].nt = RU32(); if (o + 8ull * vw_w[i].nt > (size_t)n) { o = (size_t)n + 1; break; }
+        vw_w[i].t = (uint16_t *)(void *)(b + o); o += 8ull * vw_w[i].nt;
+    }
+#undef RU32
+    if (o > (size_t)n) { port_debug("NDVR: vr/weapons.vrw is damaged; run extract_weapons.py again"); vw_nh = vw_nw = 0; return -1; }
+    port_debug("NDVR: vr/weapons.vrw: %u first-person models, %u world models, %u textures", vw_nh, vw_nw, vw_nt);
+    return 1;
+}
+
+static int vw_identify(void) {                                    /* the first-person model whose materials fit the kept draws best */
+    int nd = vr_gun_draws < VR_GUN_MAXD ? vr_gun_draws : VR_GUN_MAXD, best = -1, total = 0; double bscore = -1e9;
+    if (nd <= 0) return -1;
+    for (int d = 0; d < nd; d++) total += vr_gun_dtris[d];
+    for (uint32_t i = 0; i < vw_nh; i++) {
+        if (vw_h[i].world >= vw_nw || !strncmp(vw_h[i].name, "COPY", 4)) continue;
+        uint8_t used[64] = { 0 }; int drawn[64] = { 0 }; double got = 0, miss = 0, mod = 0, unused = 0;
+        for (int d = 0; d < nd; d++) {                            /* each draw takes the closest-sized material with the same texture size and room left */
+            int bj = -1, bd = 1 << 30;                            /* (an unused one first: a material may come in more than one draw) */
+            for (uint32_t j = 0; j < vw_h[i].nmat && j < 64; j++) {
+                int diff = (int)vw_h[i].mat[j][2] - drawn[j] - vr_gun_dtris[d];
+                if ((int)vw_h[i].mat[j][0] != vr_gun_dtw[d] || (int)vw_h[i].mat[j][1] != vr_gun_dth[d] || diff < -2) continue;
+                diff += used[j] ? 100000 : 0;
+                if (diff < bd) { bd = diff; bj = (int)j; }
+            }
+            if (bj < 0) { miss += vr_gun_dtris[d]; continue; }
+            if (!used[bj]) mod += vw_h[i].mat[bj][2];
+            used[bj] = 1; drawn[bj] += vr_gun_dtris[d]; got += vr_gun_dtris[d];
+        }
+        for (uint32_t j = 0; j < vw_h[i].nmat && j < 64; j++) if (!used[j]) unused += vw_h[i].mat[j][2];
+        double rho = mod > 0 ? got / mod : 0, spread = 0;         /* the share of its triangles the game drew (it drops back faces) */
+        for (uint32_t j = 0; j < vw_h[i].nmat && j < 64; j++) if (used[j]) spread += fabs(drawn[j] - rho * vw_h[i].mat[j][2]);
+        double score = got - 2 * miss - rho * unused - 0.5 * spread;
+        if (score > bscore) { bscore = score; best = (int)i; }
+    }
+    return best >= 0 && bscore > 0.5 * total ? best : -1;
+}
+
+static void jacobi3(double A[9], double V[9]) {                   /* eigenvectors (columns of V) of a symmetric 3x3, A becomes diagonal */
+    for (int i = 0; i < 9; i++) V[i] = i % 4 == 0;
+    for (int sweep = 0; sweep < 12; sweep++)
+        for (int p = 0; p < 2; p++) for (int q = p + 1; q < 3; q++) {
+            double apq = A[p * 3 + q]; if (fabs(apq) < 1e-12) continue;
+            double th = 0.5 * atan2(2 * apq, A[q * 3 + q] - A[p * 3 + p]), c = cos(th), s = sin(th);
+            for (int k = 0; k < 3; k++) { double akp = A[k * 3 + p], akq = A[k * 3 + q]; A[k * 3 + p] = c * akp - s * akq; A[k * 3 + q] = s * akp + c * akq; }
+            for (int k = 0; k < 3; k++) { double apk = A[p * 3 + k], aqk = A[q * 3 + k]; A[p * 3 + k] = c * apk - s * aqk; A[q * 3 + k] = s * apk + c * aqk; }
+            for (int k = 0; k < 3; k++) { double vkp = V[k * 3 + p], vkq = V[k * 3 + q]; V[k * 3 + p] = c * vkp - s * vkq; V[k * 3 + q] = s * vkp + c * vkq; }
+        }
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 2 - i; j++)   /* sort by eigenvalue, largest first */
+        if (A[j * 4] < A[(j + 1) * 4]) { double t = A[j * 4]; A[j * 4] = A[(j + 1) * 4]; A[(j + 1) * 4] = t;
+            for (int k = 0; k < 3; k++) { t = V[k * 3 + j]; V[k * 3 + j] = V[k * 3 + j + 1]; V[k * 3 + j + 1] = t; } }
+}
+static int vw_pose(const double *mo, double c[3], double E[9]) {  /* centroid and principal axes from the moment sums */
+    if (mo[0] < 12) return 0;
+    double n = mo[0]; c[0] = mo[1] / n; c[1] = mo[2] / n; c[2] = mo[3] / n;
+    double A[9] = { mo[4] / n - c[0] * c[0], mo[7] / n - c[0] * c[1], mo[8] / n - c[0] * c[2],
+                    0, mo[5] / n - c[1] * c[1], mo[9] / n - c[1] * c[2], 0, 0, mo[6] / n - c[2] * c[2] };
+    A[3] = A[1]; A[6] = A[2]; A[7] = A[5];
+    jacobi3(A, E);
+    return A[0] > 1.2 * A[4] && A[4] > 1.2 * A[8] ? 1 : 2;        /* 2: axes not well defined, use the centroid only */
+}
+static void vw_update(void) {                                     /* after the capture: which weapon, and how it moves */
+    if (vw_state == 0) vw_state = vw_load();
+    if (vw_state < 0) { vw_cur = -1; return; }
+    int h = vw_identify(), w = h >= 0 && vw_h[h].world < vw_nw ? (int)vw_h[h].world : -1;
+    static int quiet; if (h < 0 && vr_gun_draws > 0 && ++quiet % 90 == 1) {   /* say what the unknown weapon looks like, to tune the match */
+        char b[512]; int o = 0, nd = vr_gun_draws < VR_GUN_MAXD ? vr_gun_draws : VR_GUN_MAXD;
+        for (int d = 0; d < nd && o < 480; d++) o += snprintf(b + o, sizeof b - o, " %dx%d:%d", vr_gun_dtw[d], vr_gun_dth[d], vr_gun_dtris[d]);
+        b[o] = 0; port_debug("NDVR GUN: weapon not recognised, draws%s (the game's own model is shown)", b);
+    }
+    if (w != vw_cur) { if (w == vw_cand) { if (++vw_cand_n > 10) { vw_cur = w; vw_rest_n = 0; memset(vw_rest_acc, 0, sizeof vw_rest_acc);
+                                                                    port_debug("NDVR GUN: holding %s (%s)", w >= 0 ? vw_w[w].name : "nothing", h >= 0 ? vw_h[h].name : "?"); } }
+                       else { vw_cand = w; vw_cand_n = 0; } }
+    else vw_cand_n = 0;
+    if (vw_cur < 0) return;
+    if (vr_gun_rgb[3] > 0) for (int k = 0; k < 3; k++) vw_light[k] = (float)(vr_gun_rgb[k] / vr_gun_rgb[3] / 255.0);
+    if (vw_rest_n < 30) {                                         /* the rest pose: the first second or so after the weapon comes out */
+        if (vr_gun_mom[0] >= 12) { for (int k = 0; k < 10; k++) vw_rest_acc[k] += vr_gun_mom[k]; vw_rest_n++; }
+        if (vw_rest_n == 30) vw_pose(vw_rest_acc, vw_rest_c, vw_rest_E);
+        for (int i = 0; i < 9; i++) vw_R[i] = i % 4 == 0; vw_T[0] = vw_T[1] = vw_T[2] = 0;
+        return;
+    }
+    double c[3], E[9]; int ok = vw_pose(vr_gun_mom, c, E);
+    if (!ok) return;
+    for (int k = 0; k < 3; k++) vw_T[k] = (c[k] - vw_rest_c[k]) * unit_m;
+    for (int i = 0; i < 9; i++) vw_R[i] = i % 4 == 0;
+    if (ok == 1) {
+        for (int j = 0; j < 3; j++) {                             /* the same axis direction as at rest */
+            double d = E[j] * vw_rest_E[j] + E[3 + j] * vw_rest_E[3 + j] + E[6 + j] * vw_rest_E[6 + j];
+            if (d < 0) for (int k = 0; k < 3; k++) E[k * 3 + j] = -E[k * 3 + j];
+        }
+        double R[9];                                              /* R = E * Erest^T */
+        for (int r = 0; r < 3; r++) for (int cc = 0; cc < 3; cc++) R[r * 3 + cc] = E[r * 3] * vw_rest_E[cc * 3] + E[r * 3 + 1] * vw_rest_E[cc * 3 + 1] + E[r * 3 + 2] * vw_rest_E[cc * 3 + 2];
+        double tr = R[0] + R[4] + R[8], ang = acos(fmax(-1.0, fmin(1.0, (tr - 1) / 2)));
+        if (ang > 1.0 * PI_D / 180 && ang < 80 * PI_D / 180) memcpy(vw_R, R, sizeof R);   /* small wobble: none; a jump: not trusted */
+    }
+}
+
+static V3 gun_to_local(const ndvr_hand *hd, V3 q) {               /* gun axes (x right, y down, z forward) -> LOCAL direction */
+    return qrot(hd->aim.orientation, v3(q.x, -q.y, -q.z));
+}
+static void vw_draw_eye(int e, const ndvr_pose *ep) {
+    const ndvr_hand *hd = &fr.hand[hand_dom];
+    if (vw_cur < 0 || !hd->active || !(hd->aim.flags & NDVR_POSE_ORIENT_VALID) || !(hd->grip.flags & NDVR_POSE_POS_VALID)) return;
+    VwWorld *m = &vw_w[vw_cur];
+    static PlatVertex *pv; static uint16_t *ix; static uint32_t cap;
+    if (cap < m->nv) { cap = m->nv; pv = realloc(pv, cap * sizeof *pv); ix = realloc(ix, 3 * (size_t)m->nt * sizeof *ix); }
+    double s = gun_scale, nearm = 0.25 * unit_m, f = gun_f_eye, hw = gun_W * 0.5, hh = gun_H * 0.5;
+    V3 grip = v3(hd->grip.position.x, hd->grip.position.y, hd->grip.position.z), eye = v3(ep->position.x, ep->position.y, ep->position.z);
+    V3 off = gun_to_local(hd, v3(gun_off[0] / 100.0, -gun_off[1] / 100.0, gun_off[2] / 100.0));
+    V3 up = qconjrot(ep->orientation, v3(0, 1, 0)); V3 L = norm(v3(up.x + 0.3, -up.y + 0.0, -up.z - 0.4));   /* light from above, camera convention */
+    for (uint32_t i = 0; i < m->nv; i++) {
+        const float *v = m->v + 8 * i;
+        V3 q = v3(vw_R[0] * v[0] + vw_R[1] * v[1] + vw_R[2] * v[2], vw_R[3] * v[0] + vw_R[4] * v[1] + vw_R[5] * v[2], vw_R[6] * v[0] + vw_R[7] * v[1] + vw_R[8] * v[2]);
+        q = v3(q.x * s + vw_T[0], q.y * s + vw_T[1], q.z * s + vw_T[2]);
+        V3 w = gun_to_local(hd, q); w = v3(grip.x + off.x + w.x - eye.x, grip.y + off.y + w.y - eye.y, grip.z + off.z + w.z - eye.z);
+        V3 c = qconjrot(ep->orientation, w); c = v3(c.x, -c.y, -c.z);       /* eye camera space, metres */
+        V3 nq = v3(vw_R[0] * v[5] + vw_R[1] * v[6] + vw_R[2] * v[7], vw_R[3] * v[5] + vw_R[4] * v[6] + vw_R[5] * v[7], vw_R[6] * v[5] + vw_R[7] * v[6] + vw_R[8] * v[7]);
+        V3 n = qconjrot(ep->orientation, gun_to_local(hd, nq)); n = v3(n.x, -n.y, -n.z);
+        if (dot(n, c) > 0) n = v3(-n.x, -n.y, -n.z);                          /* both sides: light the side that faces the eye */
+        double lit = 0.45 + 0.75 * fmax(0.0, dot(n, L));
+        uint32_t col = 0xFF000000u;
+        for (int k = 0; k < 3; k++) { double ch = lit * (0.35 + 0.9 * vw_light[k]) * 255.0; col |= (uint32_t)(ch > 255 ? 255 : ch) << (16 - 8 * k); }
+        double z = c.z > 0.02 ? c.z : 0.02;
+        PlatVertex *o = &pv[i]; memset(o, 0, sizeof *o);
+        o->x = (float)(f * c.x / hw); o->y = (float)(-f * c.y / hh); o->z = (float)(z - nearm); o->w = (float)z;
+        o->diffuse = col; o->fog = 1; o->u0 = v[3]; o->v0 = v[4];
+    }
+    PlatDrawState st; memset(&st, 0, sizeof st);
+    st.depth_test = 1; st.depth_write = 1; st.depth_func = PLAT_CMP_LEQUAL; st.cull = PLAT_CULL_NONE; st.color_write = 0xF;
+    st.stage[0].color_op = PLAT_TOP_MODULATE; st.stage[0].color_arg1 = PLAT_ARG_TEXTURE; st.stage[0].color_arg2 = PLAT_ARG_DIFFUSE;
+    st.stage[0].alpha_op = PLAT_TOP_SELECTARG1; st.stage[0].alpha_arg1 = PLAT_ARG_DIFFUSE;
+    st.stage[0].min_filter = st.stage[0].mag_filter = PLAT_FILTER_LINEAR; st.stage[0].mip_filter = PLAT_MIP_NONE;
+    st.stage[1].color_op = PLAT_TOP_DISABLE; st.stage[1].alpha_op = PLAT_TOP_DISABLE;
+    plat_gfx_set_target(hmd_tex[e]);
+    PlatViewport vp = { (int)lroundf(eye_map[e][0]), (int)lroundf(eye_map[e][1]), (int)lroundf(gun_W * eye_map[e][2]), (int)lroundf(gun_H * eye_map[e][3]), 0.0f, 1.0f };
+    plat_gfx_viewport(&vp); plat_gfx_scissor(0, 0, 0, 0, 0);
+    if (gun_ontop) plat_gfx_clear(0, 0, 1, 1.0f, 0, 0);
+    for (int pass = -1; pass < (int)vw_nt; pass++) {                          /* one draw per texture (-1: untextured) */
+        uint32_t k = 0;
+        for (uint32_t t = 0; t < m->nt; t++) {
+            const uint16_t *tr = m->t + 4 * t; int tx = tr[3] == 0xFFFF ? -1 : tr[3];
+            if (tx != pass) continue;
+            if (tr[0] < m->nv && tr[1] < m->nv && tr[2] < m->nv) { ix[k++] = tr[0]; ix[k++] = tr[1]; ix[k++] = tr[2]; }
+        }
+        if (!k) continue;
+        if (pass >= 0) {
+            VwTex *T = &vw_t[pass];
+            if (!T->pt && T->w && T->h) { T->pt = plat_tex_create((int)T->w, (int)T->h, 1, PLAT_TEX_RGBA8, 0); if (T->pt) plat_tex_upload(T->pt, 0, 0, 0, (int)T->w, (int)T->h, T->rgba, (int)T->w * 4); }
+            st.stage[0].texture = T->pt; st.stage[0].color_op = PLAT_TOP_MODULATE;
+        } else { st.stage[0].texture = NULL; st.stage[0].color_op = PLAT_TOP_SELECTARG2; }
+        plat_gfx_draw(PLAT_PRIM_TRIANGLES, pv, (int)m->nv, ix, (int)k, &st);
+    }
+}
+static int vw_muzzle_aim(const ndvr_hand *hd, V3 *dir) {          /* aim so a shot from the eye crosses the barrel line NDVR_ZERO metres out */
+    if (vw_cur < 0 || gun_zero_m <= 0 || !(hd->grip.flags & NDVR_POSE_POS_VALID) || !(fr.head.flags & NDVR_POSE_POS_VALID)) return 0;
+    const float *mz = vw_w[vw_cur].muzzle; double s = gun_scale;
+    V3 m = gun_to_local(hd, v3(mz[0] * s, mz[1] * s, mz[2] * s + gun_zero_m));
+    V3 off = gun_to_local(hd, v3(gun_off[0] / 100.0, -gun_off[1] / 100.0, gun_off[2] / 100.0));
+    V3 p = v3(hd->grip.position.x + off.x + m.x, hd->grip.position.y + off.y + m.y, hd->grip.position.z + off.z + m.z);
+    *dir = norm(v3(p.x - fr.head.position.x, p.y - fr.head.position.y, p.z - fr.head.position.z));
+    return 1;
+}
+
 /* ---------------------------------------------------------------- end of a game frame (called from Present) */
 static Submit pending_sub;
 void vr_frame_present(void) {
@@ -375,8 +594,10 @@ void vr_frame_present(void) {
     }
     if (st == 1 && gun_enabled) {                                 /* the weapon the engine drew after the scene, into each eye at the hand */
         gun_measure();
+        if (gun_use_world) vw_update();
         for (int e = 0; e < 2; e++) {
-            gun_setup(&s.pose[e]);
+            if (gun_use_world && vw_cur >= 0) { vw_draw_eye(e, &s.pose[e]); continue; }   /* its world model */
+            gun_setup(&s.pose[e]);                                                       /* or the game's own first-person model */
             vr_d3d_gun_replay_eye(hmd_tex[e], eye_map[e][0], eye_map[e][1], eye_map[e][2], eye_map[e][3], gun_W, gun_H, gun_m, gun_mirror, gun_f_eye);
         }
         vr_d3d_restore();
