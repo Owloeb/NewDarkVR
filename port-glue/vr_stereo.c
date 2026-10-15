@@ -125,7 +125,7 @@ extern PlatTexture *vr_hud_tex; extern int vr_hud_w, vr_hud_h, vr_hud_seen;   /*
 extern unsigned vr_gl_bb_fbo(int *w, int *h);                     /* port/backends/sdl2/gl_render.c */
 extern int vr_input_captured(void), vr_input_mouse_motion(int dx, int dy), vr_input_mouse_abs(int x, int y);   /* port/win32/user32.c */
 extern void vr_input_mouse_button(int button, int down), vr_input_key(int dik, int down);
-extern int vr_gun_on, vr_gun_mirror, vr_gun_nv; extern float vr_gun_m[12], vr_gun_f, vr_gun_cx, vr_gun_cy, vr_gun_bmin[3], vr_gun_bmax[3];   /* port/dx/d3d9.c */
+extern int vr_gun_on, vr_gun_move_on, vr_gun_mirror, vr_gun_nv, vr_gun_near, vr_gun_draws; extern float vr_gun_m[12], vr_gun_f, vr_gun_cx, vr_gun_cy, vr_gun_bmin[3], vr_gun_bmax[3];   /* port/dx/d3d9.c */
 static int gun_enabled = 1, gun_ready, gun_frames, gun_ref_nv, gun_odd; static double gun_scale = 1, gun_off[3], gun_sum[3], gun_g0[3];
 
 static void xr_log(const char *line) { port_debug("NDVR: %s", line); }
@@ -301,7 +301,7 @@ static void gun_setup(const ndvr_pose *ep, int W, int H, double zarg) {
     const ndvr_hand *hd = &fr.hand[hand_dom];
     vr_gun_f = (float)(H * zarg / 1.5); vr_gun_cx = W * 0.5f; vr_gun_cy = H * 0.5f; vr_gun_mirror = 0;
     float *m = vr_gun_m; memset(m, 0, sizeof vr_gun_m); m[0] = m[5] = m[10] = 1;
-    vr_gun_on = gun_enabled;
+    vr_gun_on = gun_enabled; vr_gun_move_on = 0;
     if (!gun_enabled || !gun_ready || !hd->active || !(hd->aim.flags & NDVR_POSE_ORIENT_VALID) || !(hd->grip.flags & NDVR_POSE_POS_VALID)) return;
     double D[3] = { (hand_dom ? 1.0 : -1.0) * gun_scale, gun_scale, gun_scale }, k = 1.0 / unit_m;
     V3 col[3];
@@ -319,14 +319,21 @@ static void gun_setup(const ndvr_pose *ep, int W, int H, double zarg) {
         for (int c2 = 0; c2 < 3; c2++) m[r * 4 + c2] = (float)(cr[c2] * D[c2]);
         m[r * 4 + 3] = (float)(h + cr[0] * u[0] + cr[1] * u[1] + cr[2] * u[2]);
     }
-    vr_gun_mirror = !hand_dom;
+    vr_gun_mirror = !hand_dom; vr_gun_move_on = 1;
 }
-static void gun_stats_reset(void) { for (int i = 0; i < 3; i++) { vr_gun_bmin[i] = 1e30f; vr_gun_bmax[i] = -1e30f; } vr_gun_nv = 0; }
+static void gun_stats_reset(void) { for (int i = 0; i < 3; i++) { vr_gun_bmin[i] = 1e30f; vr_gun_bmax[i] = -1e30f; } vr_gun_nv = vr_gun_near = vr_gun_draws = 0; }
+static unsigned gun_log_n;
 static void gun_measure(void) {                                   /* after the first eye: learn the weapon's rest position */
     int nv = vr_gun_nv;
+    if (++gun_log_n % 90 == 0) {                                  /* once a second or so: what the weapon is doing */
+        const ndvr_hand *hd = &fr.hand[hand_dom];
+        port_debug("NDVR GUN: %s, %d draws %d vertices (%d pushed off the eye), box x %.2f..%.2f y %.2f..%.2f z %.2f..%.2f, rest %.2f %.2f %.2f, hand %s, m %.2f %.2f %.2f",
+            !gun_ready ? "measuring" : "in the hand", vr_gun_draws, nv, vr_gun_near, vr_gun_bmin[0], vr_gun_bmax[0], vr_gun_bmin[1], vr_gun_bmax[1], vr_gun_bmin[2], vr_gun_bmax[2],
+            gun_g0[0], gun_g0[1], gun_g0[2], hd->active ? "tracked" : "NOT tracked", vr_gun_m[3], vr_gun_m[7], vr_gun_m[11]);
+    }
     if (nv < 12) return;                                          /* no weapon drawn this frame */
-    if (gun_ready && gun_ref_nv > 0 && abs(nv - gun_ref_nv) * 4 > gun_ref_nv) {   /* a different weapon: measure again */
-        if (++gun_odd > 15) { gun_ready = 0; gun_frames = 0; gun_odd = 0; }
+    if (gun_ready && gun_ref_nv > 0 && abs(nv - gun_ref_nv) * 5 > gun_ref_nv * 2) {   /* a different weapon: measure again */
+        if (++gun_odd > 60) { gun_ready = 0; gun_frames = 0; gun_odd = 0; port_debug("NDVR GUN: vertex count %d (was %d): measuring the weapon again", nv, gun_ref_nv); }
         return;
     }
     gun_odd = 0;
