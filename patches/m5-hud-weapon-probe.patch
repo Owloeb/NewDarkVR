@@ -18,6 +18,19 @@ index f90af07..76e5d18 100644
 +int fp_006c8700(CPU *c) { vr_probe_event(c, "d3d_display_end_frame", -1); return 0; }
 +int fp_006c8600(CPU *c) { vr_probe_event(c, "d3d_display_flip", -1); return 0; }
 +int fp_0043b220(CPU *c) { return vr_probe_fire(c); }
+diff --git a/port/core/heap.c b/port/core/heap.c
+index 2d1b375..640833f 100644
+--- a/port/core/heap.c
++++ b/port/core/heap.c
+@@ -84,6 +84,8 @@ static void split(uint32_t b, uint32_t want) {       /* b is in use and at least
+     if (bflags(n) & F_FREE) { remove_free(n); uint32_t nn = next_phys(n); set_hdr(r, bsize(r) + bsize(n), F_FREE); WR32(B_PREV(nn), r); }
+     insert_free(r);
+ }
++/* NewDarkVR probe (port/core/vr_probe.c): the heap arenas, to search them for engine state */
++int vr_heap_arenas(uint32_t *out, int max, uint32_t *arena_size) { int n = narenas < max ? narenas : max; for (int i = 0; i < n; i++) out[i] = arenas[i]; *arena_size = ARENA; return n; }
+ uint32_t g_alloc(uint32_t n) {
+     if (n > 0xC0000000u) return 0;
+     uint32_t need = (n + HDR + ALIGN - 1) & ~(ALIGN - 1); if (need < MIN_BLOCK) need = MIN_BLOCK;
 diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
 index 5ec91a6..ffc9b60 100644
 --- a/port/dx/d3d9.c

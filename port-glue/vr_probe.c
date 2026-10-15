@@ -41,6 +41,7 @@
 #define PLAYER_CAM 0x00a3acb8u
 #define GLOBALS_LO 0x00780000u
 #define GLOBALS_HI 0x00a80000u
+extern int vr_heap_arenas(uint32_t *out, int max, uint32_t *arena_size);   /* port/core/heap.c (probe patch) */
 #define P(fmt, ...) port_log("NDVR PROBE " fmt, ##__VA_ARGS__)
 
 int vr_probe_on;
@@ -50,7 +51,7 @@ static unsigned frame_no, seq, n_draw, n_noz, n_rhw, n_ovl, n_clear, fires;
 static int cap_left, overlay, zclears;
 #define AIM_MAX 16
 static struct { uint32_t pitch_at, head_at; uint16_t keep_p, keep_h; } aim_t[AIM_MAX]; static int aim_n, aim_hold;
-static double persist_deg; static int persist_k, persist_wait; static uint32_t persist_at, persist_cam_before; static uint16_t persist_wrote;
+static double persist_deg; static int persist_k, persist_wait; static uint32_t persist_at, persist_cam_before; static uint16_t persist_wrote; static uint32_t derived[32]; static int nderived;
 
 static int envi(const char *n, int d) { const char *e = getenv(n); return e && *e ? atoi(e) : d; }
 static double envd(const char *n, double d) { const char *e = getenv(n); return e && *e ? atof(e) : d; }
@@ -120,6 +121,7 @@ void vr_probe_present(void) {
         P("PERSIST: heading at %08x is now %u (we wrote %u: %s); the camera heading moved %+.1f degrees since (%s)", persist_at, RD16(persist_at), persist_wrote,
           dv > -64 && dv < 64 ? "KEPT, this is a master copy" : "overwritten, derived from somewhere else", dc * 360.0 / 65536.0,
           dc * 360.0 / 65536.0 > persist_deg * 0.5 ? "the view turned with it" : "the view did not turn");
+        if (!(dv > -64 && dv < 64) && nderived < 32) derived[nderived++] = persist_at;
     }
     frame_no++; seq = 0; n_draw = n_noz = n_rhw = n_ovl = n_clear = 0; zclears = 0; overlay = 0;
     if (idle_frame > 0 && frame_no == (unsigned)idle_frame) { cap_left = 2; P("---- idle capture of frames %u and %u ----", frame_no, frame_no + 1); }
@@ -166,47 +168,58 @@ int vr_probe_fire(CPU *c) {
     P("FIRE render camera copy: pos (%.3f, %.3f, %.3f) cell %08x bank %u pitch %u heading %u (65536 = 360 deg)", (double)cam[0], (double)cam[1], (double)cam[2], RD32(CAM_COPY + 12), RD16(CAM_COPY + 16), RD16(CAM_COPY + 18), RD16(CAM_COPY + 20));
     uint32_t obj = RD32(PLAYER_CAM);
     P("FIRE *0xa3acb8 = %08x (%s)", obj, g_valid(obj, 64) ? "looks like a pointer" : "not a pointer: an object id?");
-    static Cand cand[24]; int nc = 0;
+    static Cand cand[48]; int nc = 0;
     if (g_valid(obj, 64)) {
-        nc = scan(obj, 0x400, cam, cand, 24, nc);
-        for (uint32_t o = 0; o < 0x100 && nc < 24; o += 4) { uint32_t w = RD32(obj + o); if (w >= 0x10000u && w != obj && g_valid(w, 0x200)) nc = scan(w, 0x200, cam, cand, 24, nc); }
+        nc = scan(obj, 0x400, cam, cand, 48, nc);
+        for (uint32_t o = 0; o < 0x100 && nc < 48; o += 4) { uint32_t w = RD32(obj + o); if (w >= 0x10000u && w != obj && g_valid(w, 0x200)) nc = scan(w, 0x200, cam, cand, 48, nc); }
     }
     int nobj = nc;
-    nc = scan(GLOBALS_LO, GLOBALS_HI - GLOBALS_LO, cam, cand, 24, nc);
-    P("FIRE %d place(s) holding a position within 8 units of the camera (%d inside/behind the camera object, the rest in global data):", nc, nobj);
-    int camp = RD16(CAM_COPY + 18), camh = RD16(CAM_COPY + 20), nmatch = 0; int layout[24];
+    nc = scan(GLOBALS_LO, GLOBALS_HI - GLOBALS_LO, cam, cand, 48, nc);
+    int nglob = nc;
+    uint32_t ar[64], asz = 0; int nar = vr_heap_arenas(ar, 64, &asz);
+    for (int i = 0; i < nar && nc < 48; i++) nc = scan(ar[i], asz, cam, cand, 48, nc);
+    P("FIRE %d place(s) holding a position within 8 units of the camera (%d in the camera object, %d in global data, %d on the heap: %d arenas of %u MB):", nc, nobj, nglob - nobj, nc - nglob, nar, asz >> 20);
+    int camp = RD16(CAM_COPY + 18), camh = RD16(CAM_COPY + 20), nmatch = 0; int layout[48];
     for (int i = 0; i < nc; i++) {
         uint32_t a = cand[i].addr;
         int A = ang_close(RD16(a + 18), camp) && ang_close(RD16(a + 20), camh);       /* bank, pitch, heading at +16, +18, +20 (after a cell word) */
         int B = ang_close(RD16(a + 14), camp) && ang_close(RD16(a + 16), camh);       /* bank, pitch, heading at +12, +14, +16 (straight after the position) */
-        layout[i] = A ? 1 : B ? 2 : 0; if (layout[i]) nmatch++;
-        P("  CAND %d @%08x (%s) pos (%.3f, %.3f, %.3f) off %.2f  facing layout %s  raw %08x %08x %08x %08x %08x %08x", i, a, i < nobj ? "object" : "global",
-          (double)cand[i].pos[0], (double)cand[i].pos[1], (double)cand[i].pos[2], (double)cand[i].dist, A ? "A (+18 pitch, +20 heading) = same as camera" : B ? "B (+14 pitch, +16 heading) = same as camera" : "none/different",
+        int Ah = !A && ang_close(RD16(a + 20), camh), Bh = !B && ang_close(RD16(a + 16), camh);   /* heading only: a body facing has no pitch */
+        layout[i] = A || Ah ? 1 : B || Bh ? 2 : 0; if (layout[i]) nmatch++;
+        P("  CAND %d @%08x (%s) pos (%.3f, %.3f, %.3f) off %.2f  facing layout %s  raw %08x %08x %08x %08x %08x %08x", i, a, i < nobj ? "object" : i < nglob ? "global" : "heap",
+          (double)cand[i].pos[0], (double)cand[i].pos[1], (double)cand[i].pos[2], (double)cand[i].dist, A ? "A (+18 pitch, +20 heading) = same as camera" : B ? "B (+14 pitch, +16 heading) = same as camera" : Ah ? "A, heading only (+20)" : Bh ? "B, heading only (+16)" : "none/different",
           RD32(a), RD32(a + 4), RD32(a + 8), RD32(a + 12), RD32(a + 16), RD32(a + 20));
     }
-    P("FIRE %d of them hold the same facing as the render camera", nmatch);
+    P("FIRE %d of them hold the same facing (or heading) as the render camera", nmatch);
     {   /* the facing as a direction vector or matrix row: floats (cos h cos p, sin h cos p, +-sin p), heading 0 = +x */
         double h = camh * (2.0 * 3.14159265358979 / 65536.0), pt = (int16_t)camp * (2.0 * 3.14159265358979 / 65536.0);
         float f[3] = { (float)(cos(h) * cos(pt)), (float)(sin(h) * cos(pt)), (float)sin(pt) };
         int hits = 0;
-        for (int pass = 0; pass < 2; pass++) {
-            uint32_t lo = pass ? GLOBALS_LO : obj, hi = pass ? GLOBALS_HI : obj + 0x400;
+        for (int pass = 0; pass < 2 + nar; pass++) {
+            uint32_t lo = pass >= 2 ? ar[pass - 2] : pass ? GLOBALS_LO : obj, hi = pass >= 2 ? ar[pass - 2] + asz : pass ? GLOBALS_HI : obj + 0x400;
             if (!pass && !g_valid(obj, 0x400)) continue;
-            for (uint32_t a = lo; a + 12 <= hi && hits < 16; a += 4) {
+            for (uint32_t a = lo; a + 12 <= hi && hits < 24; a += 4) {
                 if (!g_valid(a, 12)) break;
                 float v[3]; memcpy(v, GP(a), 12);
                 if (!(fabsf(v[0] - f[0]) < 0.01f && fabsf(v[1] - f[1]) < 0.01f && (fabsf(v[2] - f[2]) < 0.01f || fabsf(v[2] + f[2]) < 0.01f))) continue;
                 if (fabsf(f[0]) + fabsf(f[1]) < 0.05f) continue;
                 hits++;
-                P("  DIR @%08x (%s) (%.4f, %.4f, %.4f)  next %.4f %.4f %.4f %.4f %.4f %.4f", a, pass ? "global" : "object", (double)v[0], (double)v[1], (double)v[2],
+                P("  DIR @%08x (%s) (%.4f, %.4f, %.4f)  next %.4f %.4f %.4f %.4f %.4f %.4f", a, pass >= 2 ? "heap" : pass ? "global" : "object", (double)v[0], (double)v[1], (double)v[2],
                   (double)rdf(a + 12), (double)rdf(a + 16), (double)rdf(a + 20), (double)rdf(a + 24), (double)rdf(a + 28), (double)rdf(a + 32));
             }
         }
         P("FIRE %d place(s) hold the camera's forward direction as floats (%.4f, %.4f, +-%.4f)", hits, (double)f[0], (double)f[1], (double)f[2]);
     }
     if (persist_deg != 0 && persist_wait == 0 && nmatch) {     /* NDVR_PERSIST=deg: turn one copy per shot, never put back, see if it sticks */
-        int k = persist_k++ % nmatch, j = -1;
-        for (int i = 0; i < nc; i++) if (layout[i] && k-- == 0) { j = i; break; }
+        int j = -1, untested = 0;
+        for (int i = 0; i < nc; i++) {                         /* the first matching copy not yet shown to be derived (heap ones come last in the list) */
+            if (!layout[i]) continue;
+            uint32_t ha = cand[i].addr + (layout[i] == 1 ? 20u : 16u); int seen = 0;
+            for (int d = 0; d < nderived; d++) if (derived[d] == ha) seen = 1;
+            if (!seen) { untested++; if (j < 0) j = i; }
+        }
+        if (j < 0) { int k = persist_k++ % nmatch; for (int i = 0; i < nc; i++) if (layout[i] && k-- == 0) { j = i; break; } }
+        P("PERSIST: %d matching copies not yet tested", untested);
         if (j >= 0) {
             persist_at = cand[j].addr + (layout[j] == 1 ? 20u : 16u); persist_cam_before = RD16(CAM_COPY + 20);
             persist_wrote = (uint16_t)(RD16(persist_at) + (int)floor(persist_deg * 65536.0 / 360.0 + 0.5));

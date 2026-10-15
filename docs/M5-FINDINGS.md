@@ -29,3 +29,14 @@ flash / gun attachment reads one of those copies, but the projectile direction d
 it has already been rewritten from somewhere else. ("Stopped after reloading" was the probe's own six-shot limit.)
 Next: `NDVR_PERSIST` finds which copy is the master (a value that sticks and turns the view), and the probe now also
 lists every place holding the camera's forward direction as floats (a vector or a rotation matrix row).
+
+## Persistence test 1 (NDVR_PERSIST=10)
+
+All three facing copies (camera object +0x18, globals 0x8cdb70 and 0x93d43c) are **derived**: a value written there
+is overwritten within 10 frames and the view does not turn. So the player's real facing lives elsewhere, most likely
+on the heap (the player object's position property). Two more derived forms were found in global data:
+- 0x93d450: forward vector (x, y, -sin pitch) right after the 0x93d43c position/facing, followed by -454.1, 45.0, 0, 0,
+  1e9, 50.0: looks like a ray (aim / frob / pick ray).
+- 0x93e45c: a 3x3 rotation matrix, forward row first, then (-1, 0, 0)-ish (side) and (0, -sin p, cos p) (up).
+The probe now also searches the heap arenas (`vr_heap_arenas` added to port/core/heap.c by the probe patch), accepts
+heading-only matches (a body facing has no pitch), and tests untested copies first.
