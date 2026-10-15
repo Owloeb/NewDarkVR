@@ -10,6 +10,10 @@ Why: the archive is laid out as a NewDark mod already (LGMD models, NewDark .mtl
 read; every model using one draws white. BC7 textures are decoded and written as PNG with the same name, which
 NewDark finds in their place. Everything else is copied as it is.
 
+Weapon and arm materials (materials/ND-viewmodel.inc) get a gentler rim light: Nightdive's NewDark version adds the
+full texture again, lit, at grazing angles, which blows skin out to white under bright lights (stock NewDark draws it
+the same way). --rim X sets its strength (default 0.35; Nightdive's is 1.0); --keep-materials leaves it alone.
+
 --only-weapons limits it to the first-person and world weapon models, the meshes they need and their textures and
 materials. Needs Pillow (pip install pillow)."""
 import os, sys, struct, zipfile, io
@@ -24,11 +28,13 @@ def wanted_weapon(name):
     return False
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    argv = sys.argv[1:]; opt = {}
+    for k in ('--name', '--rim'):
+        if k in argv: i = argv.index(k); opt[k] = argv[i + 1] if i + 1 < len(argv) else ''; del argv[i:i + 2]
+    only = '--only-weapons' in argv; keep = '--keep-materials' in argv
+    args = [a for a in argv if not a.startswith('--')]
     if len(args) != 2: sys.exit(__doc__)
-    name = 'ss2ee_newdark'
-    if '--name' in sys.argv: name = sys.argv[sys.argv.index('--name') + 1]; args = [a for a in args if a != name]
-    only = '--only-weapons' in sys.argv
+    name = opt.get('--name') or 'ss2ee_newdark'; rim = float(opt.get('--rim') or 0.35)
     src = os.path.join(args[0], 'mods', 'sshock2ee.kpf')
     if not os.path.isfile(src): sys.exit('no mods/sshock2ee.kpf under ' + args[0])
     dst = os.path.join(args[1], 'DMM', name)
@@ -46,6 +52,10 @@ def main():
             n_conv += 1
             if n_conv % 50 == 0: print(f'  {n_conv} textures converted...', flush=True)
             continue
+        if not keep and nm.lower() == 'materials/nd-viewmodel.inc':
+            data = data.replace(b'include ../../materials/pass/ND-pass_rim.inc', (
+                b'render_pass\r\n{\r\n\ttexture $TEXTURE\r\n\tblend SRC_ALPHA ONE\r\n\tRGB %.2f %.2f %.2f\r\n'
+                b'\talpha func INCIDENCE 1.0 1.0 MATERIALS/ND-IR_RIM\r\n\tshaded 1\r\n}' % (rim, rim, rim)))
         with open(out, 'wb') as f: f.write(data)
         n_copy += 1
     with open(os.path.join(dst, 'mod.ini'), 'w') as f:
