@@ -26,8 +26,7 @@
  *                        facing that matches the camera (or only candidate NDVR_AIMTEST_CAND=n) for NDVR_AIMTEST_FRAMES
  *                        frames (default 1), then put it back. Only "fire..." key commands trigger it. If the shot lands
  *                        that many degrees off the crosshair, one of those copies is what aims; narrow it down with _CAND.
- *   NDVR_PERSIST=deg     experiment: on each fire press turn ONE of those copies (the next one each shot) and never put it
- *                        back; 10 frames later log whether the value stuck (a master copy) and whether the view turned.
+ *   NDVR_HUNT=1          find the master heading and pitch, then aim-test them (see "NDVR_HUNT" below).
  * Also logged on each press: every place holding the camera's forward direction as three floats (a vector or a
  * matrix row), in the camera object and in global data. */
 #include <stdio.h>
@@ -47,11 +46,11 @@ extern int vr_heap_arenas(uint32_t *out, int max, uint32_t *arena_size);   /* po
 int vr_probe_on;
 static int idle_frame = 360, aim_frames = 1, aim_cand = 0;
 static double aim_head, aim_pitch;
+static int hunt;                                                   /* NDVR_HUNT, see below */
 static unsigned frame_no, seq, n_draw, n_noz, n_rhw, n_ovl, n_clear, fires;
 static int cap_left, overlay, zclears;
 #define AIM_MAX 16
 static struct { uint32_t pitch_at, head_at; uint16_t keep_p, keep_h; } aim_t[AIM_MAX]; static int aim_n, aim_hold;
-static double persist_deg; static int persist_k, persist_wait; static uint32_t persist_at, persist_cam_before; static uint16_t persist_wrote; static uint32_t derived[32]; static int nderived;
 
 static int envi(const char *n, int d) { const char *e = getenv(n); return e && *e ? atoi(e) : d; }
 static double envd(const char *n, double d) { const char *e = getenv(n); return e && *e ? atof(e) : d; }
@@ -64,7 +63,7 @@ __attribute__((constructor)) static void probe_init(void) {
     aim_head = envd("NDVR_AIMTEST_HEAD", 0); aim_pitch = envd("NDVR_AIMTEST_PITCH", 0);
     aim_frames = envi("NDVR_AIMTEST_FRAMES", 1); if (aim_frames < 1) aim_frames = 1;
     aim_cand = envi("NDVR_AIMTEST_CAND", -1);
-    persist_deg = envd("NDVR_PERSIST", 0);
+    hunt = envi("NDVR_HUNT", 0);
 }
 
 void vr_probe_draw(const VrProbeDraw *d) {
@@ -109,26 +108,130 @@ void vr_probe_event(CPU *c, const char *name, int ov) {
     }
 }
 
+typedef struct { uint32_t addr, base; float pos[3], dist; } Cand;
+
+/* ---- NDVR_HUNT=1: find the player's master heading and pitch (values the game keeps, not copies it rebuilds every
+ * frame), then aim-test them. One step per fire press:
+ *   - heading: turn the next untested facing copy 10 degrees and leave it; 10 frames later it is the master if the value
+ *     stuck AND the view turned. Copies that are rebuilt (or stick without turning the view) are ruled out and put back.
+ *   - pitch: every press collects the places that hold the current pitch (u16 like the camera's, or float radians of
+ *     either sign) and keeps only those that held it at every earlier press too. Look up or down a little between
+ *     shots so that set shrinks. Once it is small, its entries are tested the same way (the view tilts on a hit).
+ *   - with both found (or the pitch list exhausted): every later press turns the masters by NDVR_AIMTEST_HEAD /
+ *     NDVR_AIMTEST_PITCH degrees (default 30 / 0) for NDVR_AIMTEST_FRAMES frames (default 2), so the shot shows
+ *     whether the game aims with them. */
+static int presses;
+static uint32_t mh_at; static int mp_kind = -1; static uint32_t mp_at;
+static uint32_t ruled[512]; static int nruled;
+typedef struct { uint32_t a; int kind; } PCand;                  /* kind 0: u16 like the camera; 1: float radians; 2: float -radians */
+static PCand pcs[4096]; static int npc = -1;
+static struct { int wait, is_pitch, kind; uint32_t at, wrote, orig; uint16_t cam_before; } T;
+static struct { int hold; uint32_t h_orig, p_orig; } HA;
+#define TAU 6.283185307179586
+
+static int is_ruled(uint32_t a) { for (int i = 0; i < nruled; i++) if (ruled[i] == a) return 1; return 0; }
+static void rule_out(uint32_t a) { if (nruled < 512) ruled[nruled++] = a; }
+static int s16(int v) { v &= 0xFFFF; return v > 32767 ? v - 65536 : v; }
+static uint32_t rd_val(int kind, uint32_t a) { return kind ? RD32(a) : RD16(a); }
+static void wr_val(int kind, uint32_t a, uint32_t v) { if (kind) WR32(a, v); else WR16(a, (uint16_t)v); }
+static uint32_t turned(int kind, uint32_t v, double deg) {      /* v turned by deg, in its own representation */
+    if (!kind) return (uint16_t)(v + (int)floor(deg * 65536.0 / 360.0 + 0.5));
+    float f = bf(v); f += (float)((kind == 1 ? 1 : -1) * deg * TAU / 360.0); uint32_t u; memcpy(&u, &f, 4); return u;
+}
+static int pitch_match(int kind, uint32_t a, int camp, double pt) {
+    if (!kind) return RD16(a) == camp;
+    float f = rdf(a); return isfinite(f) && fabs(f - (kind == 1 ? pt : -pt)) < 2e-4;
+}
+static void pitch_collect(uint32_t lo, uint32_t hi, int camp, double pt) {
+    for (uint32_t a = lo; a + 4 <= hi && npc < 4096; a += 2) {
+        if (!g_valid(a, 4)) break;
+        if (a >= CAM_COPY && a < CAM_COPY + 32) continue;
+        for (int k = 0; k < 3 && npc < 4096; k++) { if (k && (a & 3)) continue; if (pitch_match(k, a, camp, pt)) { pcs[npc].a = a; pcs[npc].kind = k; npc++; } }
+    }
+}
+
+static void hunt_frame(void) {
+    if (HA.hold > 0 && --HA.hold == 0) {
+        if (mh_at) WR16(mh_at, (uint16_t)HA.h_orig);
+        if (mp_kind >= 0) wr_val(mp_kind, mp_at, HA.p_orig);
+        P("HUNT AIM: masters put back");
+    }
+    if (T.wait > 0 && --T.wait == 0) {
+        uint32_t now = rd_val(T.kind, T.at);
+        int kept = T.kind ? now == T.wrote : abs(s16((int)now - (int)T.wrote)) < 64;
+        double moved = s16(RD16(CAM_COPY + (T.is_pitch ? 18 : 20)) - T.cam_before) * 360.0 / 65536.0;
+        int view = fabs(moved) > 5.0;
+        P("HUNT %s test of %08x (%s): value %s, view %s %+.1f degrees -> %s", T.is_pitch ? "pitch" : "heading", T.at,
+          T.kind == 0 ? "u16" : T.kind == 1 ? "float rad" : "float -rad", kept ? "KEPT" : "rebuilt by the game", T.is_pitch ? "pitch moved" : "heading moved", moved,
+          kept && view ? "MASTER" : "ruled out");
+        if (kept && view) { if (T.is_pitch) { mp_at = T.at; mp_kind = T.kind; } else mh_at = T.at; }
+        else { rule_out(T.at); if (kept) wr_val(T.kind, T.at, T.orig); }
+        if (mh_at && T.is_pitch == 0 && kept && view) P("HUNT: heading master found at %08x. Now look up or down a little between shots for the pitch.", mh_at);
+        if (mp_kind >= 0 && T.is_pitch && kept && view) P("HUNT: pitch master found at %08x. Every next shot is an aim test: say where it lands.", mp_at);
+    }
+}
+
+static void hunt_press(const Cand *cand, const int *layout, int nc, int nglob, const uint32_t *ar, int nar, uint32_t asz) {
+    presses++;
+    int camp = RD16(CAM_COPY + 18); double pt = s16(camp) * TAU / 65536.0;
+    /* the pitch list */
+    if (mp_kind < 0) {
+        if (abs(s16(camp)) < 300) P("HUNT pitch: you are looking almost level; look a little up or down for the pitch search");
+        else if (npc < 0) {
+            npc = 0; pitch_collect(GLOBALS_LO, GLOBALS_HI, camp, pt);
+            for (int i = 0; i < nar; i++) pitch_collect(ar[i], ar[i] + asz, camp, pt);
+            P("HUNT pitch: %d places hold the current pitch%s", npc, npc >= 4096 ? " (list full, some missed)" : "");
+        } else {
+            int k = 0; for (int i = 0; i < npc; i++) if (pitch_match(pcs[i].kind, pcs[i].a, camp, pt) && !is_ruled(pcs[i].a)) pcs[k++] = pcs[i];
+            npc = k; P("HUNT pitch: %d places held the pitch at every shot so far", npc);
+            for (int i = 0; i < npc && i < 12; i++) P("  PITCH @%08x %s", pcs[i].a, pcs[i].kind == 0 ? "u16" : pcs[i].kind == 1 ? "float rad" : "float -rad");
+        }
+    }
+    if (T.wait > 0 || HA.hold > 0) return;
+    if (!mh_at) {                                   /* heading: heap heading-only copies first, then the rest */
+        int j = -1;
+        for (int pass = 0; pass < 2 && j < 0; pass++)
+            for (int i = 0; i < nc && j < 0; i++) {
+                if (!layout[i]) continue;
+                uint32_t ha = cand[i].addr + (layout[i] == 1 ? 20u : 16u), pa = ha - 2;
+                int pref = i >= nglob && RD16(pa) == 0;
+                if ((pass == 0) != pref || is_ruled(ha)) continue;
+                j = i;
+            }
+        if (j < 0) { P("HUNT heading: every facing copy has been ruled out; the heading lives somewhere else"); return; }
+        T.is_pitch = 0; T.kind = 0; T.at = cand[j].addr + (layout[j] == 1 ? 20u : 16u); T.orig = RD16(T.at);
+        T.wrote = turned(0, T.orig, 10.0); T.cam_before = RD16(CAM_COPY + 20); wr_val(0, T.at, T.wrote); T.wait = 10;
+        P("HUNT heading: CAND %d (%08x) turned 10 degrees; keep the mouse still for a moment", j, T.at);
+        return;
+    }
+    if (mp_kind < 0 && npc > 0 && npc <= 24 && presses >= 3) {
+        int j = -1; for (int i = 0; i < npc; i++) if (!is_ruled(pcs[i].a)) { j = i; break; }
+        if (j >= 0) {
+            T.is_pitch = 1; T.kind = pcs[j].kind; T.at = pcs[j].a; T.orig = rd_val(T.kind, T.at);
+            T.wrote = turned(T.kind, T.orig, 10.0); T.cam_before = RD16(CAM_COPY + 18); wr_val(T.kind, T.at, T.wrote); T.wait = 10;
+            P("HUNT pitch: %08x tilted 10 degrees; keep the mouse still for a moment", T.at);
+            return;
+        }
+    }
+    if (mp_kind < 0 && npc != 0 && npc > 24) { P("HUNT pitch: still %d places; look up or down a little more between shots", npc); }
+    double dh = aim_head != 0 ? aim_head : 30.0;
+    HA.h_orig = RD16(mh_at); WR16(mh_at, (uint16_t)turned(0, HA.h_orig, dh));
+    if (mp_kind >= 0 && aim_pitch != 0) { HA.p_orig = rd_val(mp_kind, mp_at); wr_val(mp_kind, mp_at, turned(mp_kind, HA.p_orig, aim_pitch)); }
+    HA.hold = aim_frames > 1 ? aim_frames : 2;
+    P("HUNT AIM: master heading turned %+.1f%s for %d frames: where does this shot land?", dh, mp_kind >= 0 && aim_pitch != 0 ? " (and pitch)" : "", HA.hold);
+}
+
 void vr_probe_present(void) {
     if (!vr_probe_on) return;
     if (cap_left > 0) { P("---- end of frame %u: %u draws (%u without depth test, %u pre-transformed, %u in overlay), %u clears, %d depth clears", frame_no, n_draw, n_noz, n_rhw, n_ovl, n_clear, zclears); cap_left--; }
     else if (frame_no % 300 == 0) P("frame %u: %u draws (%u without depth test, %u pre-transformed, %u in overlay), %u clears, %d depth clears", frame_no, n_draw, n_noz, n_rhw, n_ovl, n_clear, zclears);
     if (aim_hold > 0 && --aim_hold == 0) { for (int i = 0; i < aim_n; i++) { WR16(aim_t[i].pitch_at, aim_t[i].keep_p); WR16(aim_t[i].head_at, aim_t[i].keep_h); } P("AIMTEST: %d facing copies put back", aim_n); aim_n = 0; }
-    if (persist_wait > 0 && --persist_wait == 0) {
-        int dv = (RD16(persist_at) - persist_wrote) & 0xFFFF, dc = (RD16(CAM_COPY + 20) - (int)persist_cam_before) & 0xFFFF;
-        if (dv > 32767) dv -= 65536;
-        if (dc > 32767) dc -= 65536;
-        P("PERSIST: heading at %08x is now %u (we wrote %u: %s); the camera heading moved %+.1f degrees since (%s)", persist_at, RD16(persist_at), persist_wrote,
-          dv > -64 && dv < 64 ? "KEPT, this is a master copy" : "overwritten, derived from somewhere else", dc * 360.0 / 65536.0,
-          dc * 360.0 / 65536.0 > persist_deg * 0.5 ? "the view turned with it" : "the view did not turn");
-        if (!(dv > -64 && dv < 64) && nderived < 32) derived[nderived++] = persist_at;
-    }
+    if (hunt) hunt_frame();
     frame_no++; seq = 0; n_draw = n_noz = n_rhw = n_ovl = n_clear = 0; zclears = 0; overlay = 0;
     if (idle_frame > 0 && frame_no == (unsigned)idle_frame) { cap_left = 2; P("---- idle capture of frames %u and %u ----", frame_no, frame_no + 1); }
 }
 
 /* ---- the fire log ---- */
-typedef struct { uint32_t addr, base; float pos[3], dist; } Cand;
 static int scan(uint32_t base, uint32_t len, const float cam[3], Cand *out, int max, int n) {
     for (uint32_t o = 0; o + 24 <= len && n < max; o += 4) {
         uint32_t a = base + o; if (!g_valid(a, 24)) break;
@@ -210,24 +313,8 @@ int vr_probe_fire(CPU *c) {
         }
         P("FIRE %d place(s) hold the camera's forward direction as floats (%.4f, %.4f, +-%.4f)", hits, (double)f[0], (double)f[1], (double)f[2]);
     }
-    if (persist_deg != 0 && persist_wait == 0 && nmatch) {     /* NDVR_PERSIST=deg: turn one copy per shot, never put back, see if it sticks */
-        int j = -1, untested = 0;
-        for (int i = 0; i < nc; i++) {                         /* the first matching copy not yet shown to be derived (heap ones come last in the list) */
-            if (!layout[i]) continue;
-            uint32_t ha = cand[i].addr + (layout[i] == 1 ? 20u : 16u); int seen = 0;
-            for (int d = 0; d < nderived; d++) if (derived[d] == ha) seen = 1;
-            if (!seen) { untested++; if (j < 0) j = i; }
-        }
-        if (j < 0) { int k = persist_k++ % nmatch; for (int i = 0; i < nc; i++) if (layout[i] && k-- == 0) { j = i; break; } }
-        P("PERSIST: %d matching copies not yet tested", untested);
-        if (j >= 0) {
-            persist_at = cand[j].addr + (layout[j] == 1 ? 20u : 16u); persist_cam_before = RD16(CAM_COPY + 20);
-            persist_wrote = (uint16_t)(RD16(persist_at) + (int)floor(persist_deg * 65536.0 / 360.0 + 0.5));
-            WR16(persist_at, persist_wrote); persist_wait = 10;
-            P("PERSIST: CAND %d heading (%08x) turned %+.1f degrees and left there; checking in 10 frames (keep the mouse still)", j, persist_at, persist_deg);
-        }
-    }
-    if ((aim_head != 0 || aim_pitch != 0) && aim_hold == 0) {                       /* NDVR_AIMTEST_CAND=-1 (default): every copy that matches the camera */
+    if (hunt) hunt_press(cand, layout, nc, nglob, ar, nar, asz);
+    if (!hunt && (aim_head != 0 || aim_pitch != 0) && aim_hold == 0) {                       /* NDVR_AIMTEST_CAND=-1 (default): every copy that matches the camera */
         int dh = (int)floor(aim_head * 65536.0 / 360.0 + 0.5), dp = (int)floor(aim_pitch * 65536.0 / 360.0 + 0.5);
         aim_n = 0;
         for (int i = 0; i < nc && aim_n < AIM_MAX; i++) {

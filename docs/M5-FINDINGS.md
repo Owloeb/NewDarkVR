@@ -27,7 +27,7 @@ The player camera object pointer `*0xa3acb8` (0xd9ba10 in that run) has the play
 Shots still hit the crosshair; the **muzzle flash** appeared on the left of the screen (heading +40 turns left), so the
 flash / gun attachment reads one of those copies, but the projectile direction does not, or reads it at a moment when
 it has already been rewritten from somewhere else. ("Stopped after reloading" was the probe's own six-shot limit.)
-Next: `NDVR_PERSIST` finds which copy is the master (a value that sticks and turns the view), and the probe now also
+Next: `NDVR_PERSIST (now NDVR_HUNT) finds which copy is the master (a value that sticks and turns the view), and the probe now also
 lists every place holding the camera's forward direction as floats (a vector or a rotation matrix row).
 
 ## Persistence test 1 (NDVR_PERSIST=10)
@@ -40,3 +40,15 @@ on the heap (the player object's position property). Two more derived forms were
 - 0x93e45c: a 3x3 rotation matrix, forward row first, then (-1, 0, 0)-ish (side) and (0, -sin p, cos p) (up).
 The probe now also searches the heap arenas (`vr_heap_arenas` added to port/core/heap.c by the probe patch), accepts
 heading-only matches (a body facing has no pitch), and tests untested copies first.
+
+## Heap search (NDVR_PERSIST=10, probe 6f9cb93): the heading master
+
+Found on the heap at 0x01d509c0 in that run (the address changes per run/level): the player body's position
+(camera x, y; z = eye - 2.77) followed by a cell word (0xffffffff), bank 0, pitch 0 and **heading u16 at +20**:
+heading only, no pitch. Turning it 10 degrees stuck and turned the view. It sits among the player's physics
+submodels (positions at z = eye - 5.77, -5.37, -4.97, -3.37, -0.97 next to it, 0x2c apart). Every other copy is rebuilt
+from it each frame.
+
+**A shot fired right after that write lands 10 degrees to the left** (confirmed by Owen over several retests): the
+projectile is aimed with this body heading. So controller aim horizontally = write this heading at the moment of the
+shot. Pitch is stored somewhere else (the body facing has none); `NDVR_HUNT=1` searches for it next.
