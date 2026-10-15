@@ -75,3 +75,16 @@ motion (`vr_input_mouse_motion` in port/win32/user32.c) turns heading and pitch 
 shots, flash and gun follow by construction; a closed loop can steer the camera to the controller's direction.
 `NDVR_MOUSETEST` measures degrees per count, delay and smoothing first. The probe's draw dumps are now opt-in
 (`NDVR_PROBE_CAPTURE=1`) because the PowerShell window truncates long output.
+
+## Mouse-look response (NDVR_MOUSETEST=200, 25 tests)
+
+Perfectly linear, no smoothing, no drift, identical every time:
+- **heading: 32 units (0.1758 degrees) per count**; dx < 0 turns left (heading increases)
+- **pitch: 48 units (0.2637 degrees) per count**; dy < 0 looks up (pitch decreases)
+- **delay: 2 frames** (the change shows on the 3rd presented frame), then it holds
+- nothing happens in menus (pointer not captured), as intended
+
+So controller aim = inject `round((target - current - pending) / 32)` counts sideways and `/ 48` up/down each frame,
+with `pending` = counts sent in the last 2 frames. Shots, flash and gun follow by construction. Granularity is 0.18 /
+0.26 degrees (3 / 5 cm at 10 m); the in-game mouse sensitivity setting changes the scale, so measure it at start-up
+(one known nudge) rather than hard-coding it. Pitch limits not measured yet.
