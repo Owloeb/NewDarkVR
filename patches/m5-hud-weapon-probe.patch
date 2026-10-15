@@ -32,7 +32,7 @@ index 2d1b375..640833f 100644
      if (n > 0xC0000000u) return 0;
      uint32_t need = (n + HDR + ALIGN - 1) & ~(ALIGN - 1); if (need < MIN_BLOCK) need = MIN_BLOCK;
 diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
-index b5bda25..9aff234 100644
+index fda8522..8a1d95a 100644
 --- a/port/dx/d3d9.c
 +++ b/port/dx/d3d9.c
 @@ -431,6 +431,7 @@ static void vr_capture(uint32_t base, uint32_t stride, uint32_t span, int pos) {
@@ -40,10 +40,10 @@ index b5bda25..9aff234 100644
      }
  }
 +#include "vr_probe.h"      /* NewDarkVR probe (port/core/vr_probe.c) */
- /* NewDarkVR (port/core/vr_stereo.c): the game draws its HUD into a render-target texture and composites it over the 3D
-  * view with one full-screen quad at the end of the frame. That texture is the headset's HUD panel. */
- PlatTexture *vr_hud_tex; int vr_hud_w, vr_hud_h, vr_hud_seen;
-@@ -461,6 +462,15 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+ /* NewDarkVR (port/core/vr_stereo.c): the held weapon. Inside an eye render the engine clears the depth buffer only
+  * (flags = D3DCLEAR_ZBUFFER) and then draws the first-person weapon with screen-space vertices. While vr_gun_on, those
+  * vertices are turned back into camera space (x right, y down, z forward, in engine units: z = 1 / rhw), moved by
+@@ -490,6 +491,15 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
      if (idx && num_vertices && hi - lo + 1 > num_vertices + min_index) { /* trust the indices */ }
      uint32_t span = hi - lo + 1;
      if (vr_cap_on && L.rhw) vr_capture(vbase + lo * stride, stride, span, L.pos);
@@ -59,7 +59,7 @@ index b5bda25..9aff234 100644
      if (L.rhw && span == 4 && prims == 2 && !d->st.rs[7]) vr_hud_check(d, vbase + lo * stride, stride, L.pos);
      size_t maxidx = (size_t)nseq * 3 + 6;
      if (d->icap < (int)maxidx) { d->icap = (int)maxidx; d->ibuf = realloc(d->ibuf, (size_t)d->icap * sizeof *d->ibuf); }
-@@ -825,6 +835,7 @@ static void dev_reset(CPU *c, ComObj *s) {
+@@ -855,6 +865,7 @@ static void dev_reset(CPU *c, ComObj *s) {
  }
  static void dev_present(CPU *c, ComObj *s) {
      Device *d = DEV(s); (void)c;
@@ -67,7 +67,7 @@ index b5bda25..9aff234 100644
      { extern void vr_frame_present(void); vr_frame_present(); }   /* NewDarkVR: the headset frame ends here (port/core/vr_stereo.c) */
      plat_gfx_present(); port_frame_presented(); plat_gfx_begin_frame(); plat_gfx_set_target(surface_target(R(d->rt))); apply_viewport(d);
      c->eax = 0;
-@@ -930,10 +941,11 @@ static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->r
+@@ -960,10 +971,11 @@ static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->r
  static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
  static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
  static Device *g_vr_dev;   /* NewDarkVR: the device, for vr_d3d_* below */
@@ -78,6 +78,6 @@ index b5bda25..9aff234 100644
  static void dev_clear(CPU *c, ComObj *s) {
      Device *d = DEV(s); uint32_t n = A(1), rects = A(2), flags = A(3); float z = u2f(A(5));
 +    if (vr_probe_on) vr_probe_clear(n, flags, A(4), A(5));
+     if (vr_eye_active && (flags & 7) == 2) vr_vm_phase = 1;          /* NewDarkVR: what follows is the held weapon */
      int color = (flags & 1) != 0, depth = (flags & 2) && d->ds, sten = (flags & 4) && d->ds;
      if (!n || !rects) { plat_gfx_clear(color, A(4), depth, z, sten, A(6)); RET(0); return; }
-     for (uint32_t i = 0; i < n; i++) { uint32_t r = rects + 16 * i; plat_gfx_scissor(1, (int32_t)RD32(r), (int32_t)RD32(r + 4), (int32_t)(RD32(r + 8) - RD32(r)), (int32_t)(RD32(r + 12) - RD32(r + 4))); plat_gfx_clear(color, A(4), depth, z, sten, A(6)); }

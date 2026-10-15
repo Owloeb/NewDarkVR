@@ -64,11 +64,13 @@ and videos use it too; it holds still while a cursor is up). The gun
 hand (`$env:NDVR_HAND="left"` for left-handed) aims: the game's mouse look follows the controller, so shots go where
 it points. Trigger = fire / click, A or X = use (right mouse button), B or Y = Tab (inventory; the hand then points
 at the panel with a cursor), thumbstick left/right = snap turn, left menu button = recentre.
-Walking is still on the keyboard, and the gun model still hangs off your head. All tuning variables are listed at the
+The game's own first-person weapon is drawn in the gun hand (mirrored for the left hand); `NDVR_GUN_X/Y/Z` (cm)
+move it in the hand. Walking is still on the keyboard, relative to where the gun points. All tuning variables are listed at the
 top of `port-glue/vr_stereo.c`. `python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled --uninstall` puts your
 checkout back to vanilla.
 
-**Next up:** thumbstick walking (relative to your body, not the gun), then the gun model moved to your hand.
+**Next up:** enemy target brackets placed in 3D (they are drawn for the gun's camera, so on the head-following HUD
+they sit off the enemy), then thumbstick walking relative to your body.
 
 **Probe build (HUD and weapon):** `python3 tools/install_into_port.py <NewDarkRecompiled checkout> --probe`, rebuild with `--fastpaths`, then run
 without the VR flags: `$env:NDVR_PROBE=1; $env:SS2PORT_NOVSYNC=1; .\ss2port.exe --windowed SS2.exe`. Walk around in a level, fire the

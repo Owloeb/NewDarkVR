@@ -22,7 +22,8 @@
  * Gun hand (NDVR_HAND=left or right, default right). The engine's own mouse look follows where it points: every
  * frame the difference between the engine's heading/pitch and the hand's aim is sent as mouse motion (32 heading /
  * 48 pitch units per count, measured; 2 frames in flight are accounted for), so shots, the muzzle flash and the gun
- * all aim with the controller. Walking with the keyboard is relative to that aim for now. Controls on that hand:
+ * all aim with the controller, and the game's first-person weapon is drawn in that hand (mirrored for the left hand).
+ * Walking with the keyboard is relative to that aim for now. Controls on that hand:
  *   trigger = left mouse button (fire; click in the inventory and menus), A / X = right mouse button,
  *   B / Y = Tab (inventory / cursor mode), thumbstick left/right = snap turn.
  * HUD panel. The game draws its HUD into a texture of its own and pastes it over the 3D view; in the headset that
@@ -51,6 +52,9 @@
  *   NDVR_HUD_CROSSHAIR  1 to keep the game's crosshair in the HUD
  *   NDVR_HUD_PULL / NDVR_HUD_LIFT   in play, the HUD's left and right edges (health, ammo) are moved this many degrees
  *                    in towards the middle / up (default 12 / 6)
+ *   NDVR_GUN         0 to leave the weapon where the game draws it
+ *   NDVR_GUN_X / NDVR_GUN_Y / NDVR_GUN_Z   move the weapon in the hand, in cm (right, up, forward; default 0)
+ *   NDVR_GUN_SCALE   weapon size (default 1)
  *   NDVR_HUD_SPLIT   how much of each side moves, as a fraction of the HUD's width (default 0.21; 0 = keep it whole)
  * Run with SS2PORT_NOVSYNC=1 so the desktop window does not pace the headset. */
 #ifdef _WIN32
@@ -121,6 +125,8 @@ extern PlatTexture *vr_hud_tex; extern int vr_hud_w, vr_hud_h, vr_hud_seen;   /*
 extern unsigned vr_gl_bb_fbo(int *w, int *h);                     /* port/backends/sdl2/gl_render.c */
 extern int vr_input_captured(void), vr_input_mouse_motion(int dx, int dy), vr_input_mouse_abs(int x, int y);   /* port/win32/user32.c */
 extern void vr_input_mouse_button(int button, int down), vr_input_key(int dik, int down);
+extern int vr_gun_on, vr_gun_mirror, vr_gun_nv; extern float vr_gun_m[12], vr_gun_f, vr_gun_cx, vr_gun_cy, vr_gun_bmin[3], vr_gun_bmax[3];   /* port/dx/d3d9.c */
+static int gun_enabled = 1, gun_ready, gun_frames, gun_ref_nv, gun_odd; static double gun_scale = 1, gun_off[3], gun_sum[3], gun_g0[3];
 
 static void xr_log(const char *line) { port_debug("NDVR: %s", line); }
 static void rt_init(void *a) {
@@ -171,6 +177,8 @@ static void init_env(void) {
     hand_dom = 1; { const char *h = getenv("NDVR_HAND"); if (h && (*h == 'l' || *h == 'L')) hand_dom = 0; }
     aim_on = envi("NDVR_AIM", 1); aim_uh = envd("NDVR_AIM_UNITS_H", 32); aim_uv = envd("NDVR_AIM_UNITS_V", 48);
     snap_deg = envd("NDVR_SNAP", 30); hud_radius = envd("NDVR_HUD_DIST", 1.2); hud_angle = envd("NDVR_HUD_ANGLE", 80); hud_follow = envd("NDVR_HUD_FOLLOW", 0.1);
+    gun_enabled = envi("NDVR_GUN", 1); gun_scale = envd("NDVR_GUN_SCALE", 1.0);
+    gun_off[0] = envd("NDVR_GUN_X", 0); gun_off[1] = envd("NDVR_GUN_Y", 0); gun_off[2] = envd("NDVR_GUN_Z", 0);
     hud_crosshair = envi("NDVR_HUD_CROSSHAIR", 0); hud_split = envd("NDVR_HUD_SPLIT", 0.21); hud_pull = envd("NDVR_HUD_PULL", 12); hud_lift = envd("NDVR_HUD_LIFT", 6);
     if (hud_split < 0.05 || hud_split > 0.45) hud_split = 0;
     if (hud_radius < 0.3) hud_radius = 0.3; if (hud_angle < 20) hud_angle = 20; if (hud_angle > 170) hud_angle = 170; if (hud_follow < 0) hud_follow = 0; if (hud_follow > 1) hud_follow = 1;
@@ -279,6 +287,57 @@ static void controls(int in_game, double pw, double ph) {
     if (chg & NDVR_BTN_PRIMARY) vr_input_mouse_button(1, (b & NDVR_BTN_PRIMARY) != 0);
     if (chg & NDVR_BTN_SECONDARY) vr_input_key(0x0F, (b & NDVR_BTN_SECONDARY) != 0);
     btn_was[hand_dom] = b;
+}
+
+/* ---------------------------------------------------------------- the held weapon on the gun hand
+ * The engine draws the first-person weapon relative to the camera. port/dx/d3d9.c turns its vertices back into camera
+ * space (x right, y down, z forward, engine units) and applies vr_gun_m; here that matrix is built per eye:
+ *   p' = R (D (p - g0) + off) + hand
+ * g0: the weapon's rest position (the middle of its bounding box, measured over its first 30 frames, again after a
+ * weapon change), D: scale and the left-hand mirror, R: the gun hand's aim orientation seen from the eye, hand: the
+ * gun hand's grip position seen from the eye. Before g0 is known the matrix is the identity (the weapon stays put). */
+static V3 qconjrot(ndvr_quat q, V3 v) { ndvr_quat c = { -q.x, -q.y, -q.z, q.w }; return qrot(c, v); }
+static void gun_setup(const ndvr_pose *ep, int W, int H, double zarg) {
+    const ndvr_hand *hd = &fr.hand[hand_dom];
+    vr_gun_f = (float)(H * zarg / 1.5); vr_gun_cx = W * 0.5f; vr_gun_cy = H * 0.5f; vr_gun_mirror = 0;
+    float *m = vr_gun_m; memset(m, 0, sizeof vr_gun_m); m[0] = m[5] = m[10] = 1;
+    vr_gun_on = gun_enabled;
+    if (!gun_enabled || !gun_ready || !hd->active || !(hd->aim.flags & NDVR_POSE_ORIENT_VALID) || !(hd->grip.flags & NDVR_POSE_POS_VALID)) return;
+    double D[3] = { (hand_dom ? 1.0 : -1.0) * gun_scale, gun_scale, gun_scale }, k = 1.0 / unit_m;
+    V3 col[3];
+    for (int i = 0; i < 3; i++) {                                 /* the gun's axes (camera convention) -> controller -> LOCAL -> eye -> camera convention */
+        V3 q = v3(i == 0, i == 1, i == 2), c = v3(q.x, -q.y, -q.z), l = qrot(hd->aim.orientation, c), e = qconjrot(ep->orientation, l);
+        col[i] = v3(e.x, -e.y, -e.z);
+    }
+    V3 hp = qconjrot(ep->orientation, v3(hd->grip.position.x - ep->position.x, hd->grip.position.y - ep->position.y, hd->grip.position.z - ep->position.z));
+    V3 hand = v3(hp.x * k, -hp.y * k, -hp.z * k);
+    double off[3] = { gun_off[0] / 100.0 * k, -gun_off[1] / 100.0 * k, gun_off[2] / 100.0 * k };   /* cm: right, up, forward */
+    double u[3] = { off[0] - D[0] * gun_g0[0], off[1] - D[1] * gun_g0[1], off[2] - D[2] * gun_g0[2] };
+    for (int r = 0; r < 3; r++) {
+        double cr[3] = { r == 0 ? col[0].x : r == 1 ? col[0].y : col[0].z, r == 0 ? col[1].x : r == 1 ? col[1].y : col[1].z, r == 0 ? col[2].x : r == 1 ? col[2].y : col[2].z };
+        double h = r == 0 ? hand.x : r == 1 ? hand.y : hand.z;
+        for (int c2 = 0; c2 < 3; c2++) m[r * 4 + c2] = (float)(cr[c2] * D[c2]);
+        m[r * 4 + 3] = (float)(h + cr[0] * u[0] + cr[1] * u[1] + cr[2] * u[2]);
+    }
+    vr_gun_mirror = !hand_dom;
+}
+static void gun_stats_reset(void) { for (int i = 0; i < 3; i++) { vr_gun_bmin[i] = 1e30f; vr_gun_bmax[i] = -1e30f; } vr_gun_nv = 0; }
+static void gun_measure(void) {                                   /* after the first eye: learn the weapon's rest position */
+    int nv = vr_gun_nv;
+    if (nv < 12) return;                                          /* no weapon drawn this frame */
+    if (gun_ready && gun_ref_nv > 0 && abs(nv - gun_ref_nv) * 4 > gun_ref_nv) {   /* a different weapon: measure again */
+        if (++gun_odd > 15) { gun_ready = 0; gun_frames = 0; gun_odd = 0; }
+        return;
+    }
+    gun_odd = 0;
+    if (gun_ready) return;
+    for (int i = 0; i < 3; i++) gun_sum[i] += 0.5 * (vr_gun_bmin[i] + vr_gun_bmax[i]);
+    if (++gun_frames == 1) gun_ref_nv = nv;
+    if (gun_frames >= 30) {
+        for (int i = 0; i < 3; i++) { gun_g0[i] = gun_sum[i] / gun_frames; gun_sum[i] = 0; }
+        gun_ready = 1; gun_ref_nv = nv;
+        port_debug("NDVR: weapon rest position %.2f %.2f %.2f (camera units, %d vertices); now on the %s hand", gun_g0[0], gun_g0[1], gun_g0[2], nv, hand_dom ? "right" : "left");
+    }
 }
 
 /* ---------------------------------------------------------------- end of a game frame (called from Present) */
@@ -518,7 +577,11 @@ int vr_scene_hook(CPU *c) {
             vr_d3d_view_map(1, (float)((-th - L) * px), (float)((U - tv) * py), (float)(2 * th * px / W), (float)(2 * tv * py / H));
             sub.fov[e] = *f;
             vr_d3d_eye_begin(hmd_tex[e], tw, tht);
+            if (e == 0) gun_stats_reset();
+            gun_setup(ep, W, H, zarg > 0 ? zarg : 1.0);
             nd_00601430(c);
+            vr_gun_on = 0;
+            if (e == 0) gun_measure();
             continue;
         }
         vr_d3d_eye_begin(eye_tex[e], W, H);

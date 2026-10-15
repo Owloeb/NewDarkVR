@@ -99,3 +99,14 @@ with `pending` = counts sent in the last 2 frames. Shots, flash and gun follow b
 - The target brackets / health bar around an enemy are drawn by the game for its own camera, which now points where
   the gun points, not where the head looks, so on the head-following panel they sit off the enemy. A fix would pick
   those draws out of the HUD and place them in 3D along the engine camera (like the gun model); not done yet.
+
+## Weapon in the hand (first version)
+
+Inside each eye render, everything after the depth-only clear is the first-person weapon. port/dx/d3d9.c turns its
+screen-space vertices back into camera space (z = 1/rhw in engine units, x/y through the measured focal length
+H * zoom / 1.5), moves them with a per-eye matrix and projects them again; depth is refitted per draw as a + b * rhw
+from the draw's own vertices (the weapon is drawn after a depth clear, so it only has to agree with itself). The rest
+position is the middle of the weapon's bounding box over its first 30 frames (re-measured when the vertex count
+changes by a quarter for 15 frames: a weapon change). Left hand: mirrored on x, culling flipped. Unknowns: whether
+1/rhw is exactly the depth in engine units (if not, the weapon sits nearer or further than the hand), and the foot
+as the engine unit (NDVR_UNIT_M).
