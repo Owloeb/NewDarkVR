@@ -142,3 +142,14 @@ triangles cannot bring that back, and a better first-person model does not help 
 from is the same every frame. Plan: draw the weapon ourselves in each eye, from the game's own model files
 read at run time (the weapon's world model is complete; replacement packs such as Tacticool would then work as they
 are), at real scale. The capture path stays as the fallback (NDVR_GUN_SCALE to shrink it).
+
+## The weapon models themselves (tools/lgmd_info.py, Tacticool 1.05)
+
+- Tacticool's pistol in the hand (Atek_H.bin, LGMD v4): 1033 polygons, 2 sub-objects (`Grip00c` and `@s00sli`, the
+  slide, which the game moves when it fires), 6 materials, one of them the arm (`hrpistarm`): hiding the arm is
+  "skip that material's polygons". About 20% of its edges are open (the cut end of the sleeve, seams).
+- Tacticool's world pistol (Atek_W.bin): 474 polygons, 9% open edges.
+- Tacticool's AR15 in the hand: 520 polygons, 38% open edges.
+- The captured weapon in the probe runs was about 80 triangles per frame. The files hold far more than what reaches
+  the device, so drawing the model from its file will show much more of it. The game's own models are inside the
+  .crf archives (zip files) in Data/res.
