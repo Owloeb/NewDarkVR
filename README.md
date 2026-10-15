@@ -59,10 +59,11 @@ $env:NDVR_VR = 1; $env:SS2PORT_NOVSYNC = 1
 .\ss2port.exe --windowed --verbose SS2.exe
 ```
 
-In the headset the HUD (and menus, the inventory and videos) is a panel in front of you, below eye level. The gun
+In the headset the HUD is a curved helmet-style panel that follows your view with a little lag (menus, the inventory
+and videos use it too; it holds still while a cursor is up). The gun
 hand (`$env:NDVR_HAND="left"` for left-handed) aims: the game's mouse look follows the controller, so shots go where
 it points. Trigger = fire / click, A or X = use (right mouse button), B or Y = Tab (inventory; the hand then points
-at the panel with a cursor), thumbstick left/right = snap turn, left menu button = recentre (also moves the panel).
+at the panel with a cursor), thumbstick left/right = snap turn, left menu button = recentre.
 Walking is still on the keyboard, and the gun model still hangs off your head. All tuning variables are listed at the
 top of `port-glue/vr_stereo.c`. `python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled --uninstall` puts your
 checkout back to vanilla.

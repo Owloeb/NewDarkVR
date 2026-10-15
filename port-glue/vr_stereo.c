@@ -26,9 +26,10 @@
  *   trigger = left mouse button (fire; click in the inventory and menus), A / X = right mouse button,
  *   B / Y = Tab (inventory / cursor mode), thumbstick left/right = snap turn.
  * HUD panel. The game draws its HUD into a texture of its own and pastes it over the 3D view; in the headset that
- * texture is a panel in front of you (placed at each recentre, below eye level, tilted towards you). Menus and videos
- * (no 3D view) show the whole screen on the same panel. When the game shows a cursor (inventory, menus) the gun hand
- * points at the panel: a pointer dot shows where, and the game's cursor follows.
+ * texture is a curved panel (flat if the runtime has no cylinder layers) around your head, like a helmet display: it
+ * follows where you look with a little lag, and the game's own crosshair is hidden (the gun aims, not the head). Menus
+ * and videos (no 3D view) show the whole screen on the same panel. When the game shows a cursor (inventory, menus)
+ * the panel holds still and the gun hand points at it: a pointer dot shows where, and the game's cursor follows.
  *
  * Tuning (environment variables, all optional):
  *   NDVR_UNIT_M      metres per engine unit (default 0.3048, a foot)
@@ -44,8 +45,10 @@
  *   NDVR_AIM         0 to keep aiming with the mouse
  *   NDVR_AIM_UNITS_H / NDVR_AIM_UNITS_V   engine units per mouse count (default 32 / 48, the game's default sensitivity)
  *   NDVR_SNAP        snap turn in degrees (default 30)
- *   NDVR_PANEL_W / NDVR_PANEL_DIST / NDVR_PANEL_DROP   HUD panel width, distance and height below the eyes, in metres
- *                    (default 1.1 / 1.0 / 0.30)
+ *   NDVR_HUD_ANGLE   how wide the HUD is, in degrees of your view (default 80)
+ *   NDVR_HUD_DIST    its distance in metres (default 1.2)
+ *   NDVR_HUD_FOLLOW  how fast it follows your head per frame, 0..1 (default 0.1; 1 = fixed to the head, 0 = stays put)
+ *   NDVR_HUD_CROSSHAIR  1 to keep the game's crosshair in the HUD
  * Run with SS2PORT_NOVSYNC=1 so the desktop window does not pace the headset. */
 #ifdef _WIN32
 #include <stdio.h>
@@ -103,10 +106,10 @@ static ndvr_frame fr; static int fr_ok;
 static int ref_valid, was_focused; static double ref_yaw; static V3 ref_pos; static uint32_t prev_btn;
 static void init_env(void);
 /* controls (see the header) */
-static int hand_dom = 1, aim_on = 1; static double aim_uh = 32, aim_uv = 48, snap_deg = 30, panel_dist = 1.0, panel_drop = 0.30, panel_w = 1.1;
+static int hand_dom = 1, aim_on = 1, hud_crosshair; static double aim_uh = 32, aim_uv = 48, snap_deg = 30, hud_radius = 1.2, hud_angle = 80, hud_follow = 0.1;
 static double body_yaw; static int body_valid, snap_armed = 1;   /* the body's facing in the game: snap turn; the engine's own heading follows the gun */
 static int pend_h[2], pend_v[2];                                  /* aim: heading / pitch units sent as mouse motion in the last two frames */
-static ndvr_pose panel_pose; static int panel_valid;
+static ndvr_pose panel_pose; static int panel_valid; static double pan_yaw, pan_pitch; static V3 pan_pos; static int pan_curved;
 static int eng_h, eng_p;                                          /* the engine camera's heading and pitch at the last scene render */
 static double ptr_u = -1, ptr_v = -1;
 static int frame_state;                                           /* 0: no headset frame yet this game frame, 1: begun by the scene render, 2: already closed */
@@ -125,7 +128,7 @@ static void rt_init(void *a) {
 static void rt_begin(void *a) { (void)a; fr_ok = ndvr_begin_frame(&fr); }
 
 typedef struct { ndvr_pose pose[2]; ndvr_fov fov[2]; int w[2], h[2]; int mirror; PlatTexture *tex[2]; int flip; int rendered;
-                 int panel; PlatTexture *ptex; ndvr_pose ppose; float pw, ph; int cx, cy; } Submit;   /* panel: 0 none, 1 HUD texture, 2 back buffer */
+                 int panel; PlatTexture *ptex; ndvr_pose ppose; float pw, ph, radius; int hole, cx, cy; } Submit;   /* panel: 0 none, 1 HUD texture, 2 back buffer */
 static void rt_submit(void *data, PlatDrawFn draw) {
     Submit *s = data; (void)draw;
     if (s->rendered) {
@@ -137,7 +140,7 @@ static void rt_submit(void *data, PlatDrawFn draw) {
     }
     if (s->panel) {
         int w, h; unsigned fbo = s->panel == 1 ? vr_gl_tex_fbo(s->ptex, &w, &h) : vr_gl_bb_fbo(&w, &h);
-        ndvr_panel_submit(fbo, w, h, s->flip, s->panel == 2, &s->ppose, s->pw, s->ph, s->cx, s->cy);
+        ndvr_panel_submit(fbo, w, h, s->flip, s->panel == 2, &s->ppose, s->pw, s->ph, s->radius, s->hole, s->cx, s->cy);
     }
     ndvr_end_frame();
 }
@@ -164,9 +167,11 @@ static void init_env(void) {
         mode == 2 ? "headset" : mode == 3 ? "calibration" : mode == 1 ? "side-by-side preview" : "normal", unit_m, fov_h, fov_v, flip_yaw, flip_pitch, flip_roll, flip_side, flip_y, no_pos, zoom_mul > 0 ? zoom_mul : 1.0);
     hand_dom = 1; { const char *h = getenv("NDVR_HAND"); if (h && (*h == 'l' || *h == 'L')) hand_dom = 0; }
     aim_on = envi("NDVR_AIM", 1); aim_uh = envd("NDVR_AIM_UNITS_H", 32); aim_uv = envd("NDVR_AIM_UNITS_V", 48);
-    snap_deg = envd("NDVR_SNAP", 30); panel_dist = envd("NDVR_PANEL_DIST", 1.0); panel_drop = envd("NDVR_PANEL_DROP", 0.30); panel_w = envd("NDVR_PANEL_W", 1.1);
-    if (mode == 2) port_debug("NDVR: %s hand, aim %s (%.0f / %.0f units per count), snap turn %.0f deg, panel %.2f m wide at %.2f m, %.2f m below the eyes",
-        hand_dom ? "right" : "left", aim_on ? "on" : "off", aim_uh, aim_uv, snap_deg, panel_w, panel_dist, panel_drop);
+    snap_deg = envd("NDVR_SNAP", 30); hud_radius = envd("NDVR_HUD_DIST", 1.2); hud_angle = envd("NDVR_HUD_ANGLE", 80); hud_follow = envd("NDVR_HUD_FOLLOW", 0.1);
+    hud_crosshair = envi("NDVR_HUD_CROSSHAIR", 0);
+    if (hud_radius < 0.3) hud_radius = 0.3; if (hud_angle < 20) hud_angle = 20; if (hud_angle > 170) hud_angle = 170; if (hud_follow < 0) hud_follow = 0; if (hud_follow > 1) hud_follow = 1;
+    if (mode == 2) port_debug("NDVR: %s hand, aim %s (%.0f / %.0f units per count), snap turn %.0f deg, HUD %.0f deg wide at %.2f m, follow %.2f, crosshair %s",
+        hand_dom ? "right" : "left", aim_on ? "on" : "off", aim_uh, aim_uv, snap_deg, hud_angle, hud_radius, hud_follow, hud_crosshair ? "shown" : "hidden");
 }
 
 /* ---------------------------------------------------------------- recentre, snap turn, the HUD panel's place */
@@ -175,14 +180,24 @@ static ndvr_quat qmul(ndvr_quat a, ndvr_quat b) {
                     a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z };
     return r;
 }
-static void place_panel(void) {                                   /* in front of the recentred head, below eye level, tilted to face it */
-    double tilt = -atan2(panel_drop, panel_dist);
-    ndvr_quat qy = { 0, (float)sin(ref_yaw / 2), 0, (float)cos(ref_yaw / 2) }, qx = { (float)sin(tilt / 2), 0, 0, (float)cos(tilt / 2) };
+static void place_panel(int snap) {                               /* the HUD follows the head (smoothed); snap: jump there now */
+    HeadAngles ha = head_angles(fr.head.orientation);
+    V3 hp = v3(fr.head.position.x, fr.head.position.y, fr.head.position.z);
+    if (snap || !panel_valid) { pan_yaw = ha.yaw; pan_pitch = ha.pitch; }
+    else { pan_yaw = wrap_pi(pan_yaw + wrap_pi(ha.yaw - pan_yaw) * hud_follow); pan_pitch += (ha.pitch - pan_pitch) * hud_follow; }
+    pan_pos = hp;
+    pan_curved = ndvr_has_curved_panels();
+    ndvr_quat qy = { 0, (float)sin(pan_yaw / 2), 0, (float)cos(pan_yaw / 2) }, qx = { (float)sin(pan_pitch / 2), 0, 0, (float)cos(pan_pitch / 2) };
     panel_pose.orientation = qmul(qy, qx);
-    panel_pose.position.x = (float)(ref_pos.x - sin(ref_yaw) * panel_dist);
-    panel_pose.position.y = (float)(ref_pos.y - panel_drop);
-    panel_pose.position.z = (float)(ref_pos.z - cos(ref_yaw) * panel_dist);
+    V3 c = pan_pos;
+    if (!pan_curved) { V3 f = qrot(panel_pose.orientation, v3(0, 0, -1)); c = v3(c.x + f.x * hud_radius, c.y + f.y * hud_radius, c.z + f.z * hud_radius); }
+    panel_pose.position.x = (float)c.x; panel_pose.position.y = (float)c.y; panel_pose.position.z = (float)c.z;
     panel_pose.flags = NDVR_POSE_ORIENT_VALID | NDVR_POSE_POS_VALID; panel_valid = 1;
+}
+static void panel_size(int src_w, int src_h, double *pw, double *ph) {   /* arc length (curved) or width (flat), and height */
+    double a = hud_angle * PI_D / 180.0;
+    *pw = pan_curved ? hud_radius * a : 2.0 * hud_radius * tan(a / 2);
+    *ph = *pw * (src_w > 0 ? (double)src_h / src_w : 9.0 / 16.0);
 }
 static void track_update(void) {
     int focused = ndvr_focused();                                 /* recentre when the headset goes on (focus gained), on the */
@@ -190,7 +205,7 @@ static void track_update(void) {
         ((fr.hand[0].buttons & NDVR_BTN_MENU) && !(prev_btn & NDVR_BTN_MENU))) {
         HeadAngles ha = head_angles(fr.head.orientation);
         ref_yaw = ha.yaw; ref_pos = v3(fr.head.position.x, fr.head.position.y, fr.head.position.z); ref_valid = 1;
-        place_panel();
+        place_panel(1);
     }
     prev_btn = fr.hand[0].buttons;
     was_focused = focused;
@@ -215,13 +230,20 @@ static void aim_update(const ndvr_hand *hd) {
 }
 static int panel_hit(const ndvr_hand *hd, double pw, double ph, double *u, double *v) {
     if (!panel_valid || !(hd->aim.flags & NDVR_POSE_POS_VALID)) return 0;
-    V3 o = v3(hd->aim.position.x, hd->aim.position.y, hd->aim.position.z), d = qrot(hd->aim.orientation, v3(0, 0, -1));
-    V3 P = v3(panel_pose.position.x, panel_pose.position.y, panel_pose.position.z);
-    V3 n = qrot(panel_pose.orientation, v3(0, 0, 1)), ux = qrot(panel_pose.orientation, v3(1, 0, 0)), uy = qrot(panel_pose.orientation, v3(0, 1, 0));
-    double dn = dot(d, n); if (fabs(dn) < 1e-6) return 0;
-    double t = dot(v3(P.x - o.x, P.y - o.y, P.z - o.z), n) / dn; if (t <= 0) return 0;
-    V3 h = v3(o.x + d.x * t - P.x, o.y + d.y * t - P.y, o.z + d.z * t - P.z);
-    *u = dot(h, ux) / pw + 0.5; *v = 0.5 - dot(h, uy) / ph;
+    ndvr_quat qi = { -panel_pose.orientation.x, -panel_pose.orientation.y, -panel_pose.orientation.z, panel_pose.orientation.w };
+    V3 d = qrot(qi, qrot(hd->aim.orientation, v3(0, 0, -1)));    /* the ray in the panel's own frame */
+    V3 o = qrot(qi, v3(hd->aim.position.x - panel_pose.position.x, hd->aim.position.y - panel_pose.position.y, hd->aim.position.z - panel_pose.position.z));
+    if (pan_curved) {                                             /* inside a cylinder of radius r around +Y; the image is centred on -Z */
+        double r = hud_radius, a = d.x * d.x + d.z * d.z, b = 2 * (o.x * d.x + o.z * d.z), c = o.x * o.x + o.z * o.z - r * r, disc = b * b - 4 * a * c;
+        if (a < 1e-9 || disc < 0) return 0;
+        double t = (-b + sqrt(disc)) / (2 * a); if (t <= 0) return 0;
+        V3 h = v3(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t);
+        *u = atan2(h.x, -h.z) / (pw / r) + 0.5; *v = 0.5 - h.y / ph;
+    } else {                                                      /* a flat quad facing +Z */
+        if (fabs(d.z) < 1e-6) return 0;
+        double t = -o.z / d.z; if (t <= 0) return 0;
+        *u = (o.x + d.x * t) / pw + 0.5; *v = 0.5 - (o.y + d.y * t) / ph;
+    }
     return *u >= 0 && *u <= 1 && *v >= 0 && *v <= 1;
 }
 static void controls(int in_game, double pw, double ph) {
@@ -277,10 +299,12 @@ void vr_frame_present(void) {
     int src_w = 0, src_h = 0;
     if (st == 1 && hud && vr_hud_tex && vr_hud_w > 0) { s.panel = 1; s.ptex = vr_hud_tex; src_w = vr_hud_w; src_h = vr_hud_h; }
     else if (st != 1 && W > 0 && H > 0) { s.panel = 2; src_w = W; src_h = H; }
-    double pw = panel_w, ph = src_w > 0 ? panel_w * src_h / src_w : panel_w * 9.0 / 16.0;
+    if (vr_input_captured() || !panel_valid) place_panel(0);     /* the HUD follows the head in play; it holds still while a cursor is up */
+    double pw, ph; panel_size(src_w, src_h, &pw, &ph);
     controls(st == 1, pw, ph);
     if (s.panel && panel_valid) {
-        s.ppose = panel_pose; s.pw = (float)pw; s.ph = (float)ph;
+        s.ppose = panel_pose; s.pw = (float)pw; s.ph = (float)ph; s.radius = pan_curved ? (float)hud_radius : 0;
+        s.hole = s.panel == 1 && !hud_crosshair ? (src_w * 28 + 1279) / 1280 : 0;   /* the game's crosshair (16 px at 1280) points the head's way: hide it */
         s.cx = ptr_u >= 0 ? (int)(ptr_u * src_w) : -1; s.cy = ptr_v >= 0 ? (int)(ptr_v * src_h) : -1;
     } else s.panel = 0;
     plat_gfx_deferred(rt_submit, &s, sizeof s);

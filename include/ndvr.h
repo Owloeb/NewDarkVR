@@ -115,14 +115,19 @@ void        ndvr_set_submit_views(const ndvr_pose pose[2], const ndvr_fov fov[2]
  * src_fbo is a framebuffer id in the same GL context; flip_y flips vertically (for images stored top row first). */
 void        ndvr_blit_eye(int eye, uint32_t src_fbo, int src_w, int src_h, int flip_y);
 
-/* Optional, call between ndvr_begin_frame() (returned 1) and ndvr_end_frame(): show a flat panel (an OpenXR quad
- * layer) on top of the 3D view, e.g. the game's HUD or a menu. src_fbo/src_w/src_h is copied into the panel's own
- * image each call (flip_y as for ndvr_blit_eye). opaque = 0 blends with the image's alpha. pose is the panel centre in
- * LOCAL space, the visible side facing +Z of the pose; width_m x height_m its size in metres. cursor_x/cursor_y (image
+/* Optional, call between ndvr_begin_frame() (returned 1) and ndvr_end_frame(): show a panel on top of the 3D view, e.g.
+ * the game's HUD or a menu. src_fbo/src_w/src_h is copied into the panel's own image each call (flip_y as for
+ * ndvr_blit_eye). opaque = 0 blends with the image's alpha. width_m x height_m is its size in metres.
+ * radius_m = 0: a flat quad; pose is its centre in LOCAL space, the visible side facing +Z of the pose.
+ * radius_m > 0 (and ndvr_has_curved_panels()): a curved panel on a cylinder of that radius around pose (vertical axis
+ * +Y of the pose), centred on the pose's -Z and seen from inside; width_m is the arc length.
+ * hole_px > 0 clears a square of that size at the image centre (to hide a crosshair). cursor_x/cursor_y (image
  * pixels, top-left origin; -1 for none) draws a pointer cursor. A frame where no eye was written (no ndvr_blit_eye or
  * ndvr_bind_eye) shows only the panel, for menus. Applies to one frame. */
 void        ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int opaque, const ndvr_pose *pose,
-                              float width_m, float height_m, int cursor_x, int cursor_y);
+                              float width_m, float height_m, float radius_m, int hole_px, int cursor_x, int cursor_y);
+/* 1 if the runtime supports curved panels (XR_KHR_composition_layer_cylinder). */
+int         ndvr_has_curved_panels(void);
 
 /* Bind an eye's framebuffer and set the viewport to cover it. ndvr_unbind() restores the
  * framebuffer binding that was current when ndvr_bind_eye() was first called this frame. */

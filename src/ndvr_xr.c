@@ -202,6 +202,7 @@ static XrSession g_sess;
 static XrSpace g_local, g_view;
 static XrSessionState g_state = XR_SESSION_STATE_UNKNOWN;
 static int g_running, g_exit, g_inited;
+static int g_cylOffered, g_cylinder;   /* XR_KHR_composition_layer_cylinder: offered by the runtime / enabled */
 
 static Eye g_eye[2];
 static GLenum g_fmt;
@@ -556,6 +557,8 @@ static int runtimeHasOpenGL(void)
         const char *nm = p[i].extensionName;
         if (!strcmp(nm, XR_KHR_OPENGL_ENABLE_EXTENSION_NAME))
             gl = 1;
+        if (!strcmp(nm, XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME))
+            g_cylOffered = 1;
         if (!strncmp(nm, "XR_KHR_", 7) && strstr(nm, "_enable"))
             logf_("  runtime offers %s", nm);
     }
@@ -571,7 +574,7 @@ int ndvr_init(void *hdc, void *hglrc)
 {
     HMODULE m;
     PFN_xrCreateInstance createInstance = NULL;
-    const char *exts[1];
+    const char *exts[2];
     XrInstanceCreateInfo ici;
     XrSystemGetInfo gi;
     XrGraphicsRequirementsOpenGLKHR req;
@@ -620,6 +623,8 @@ int ndvr_init(void *hdc, void *hglrc)
     ici.applicationInfo.applicationVersion = 1;
     strcpy(ici.applicationInfo.engineName, "NewDarkRecompiled");
     ici.enabledExtensionCount = 1;
+    if (g_cylOffered)
+        exts[ici.enabledExtensionCount++] = XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME;
     ici.enabledExtensionNames = exts;
     {
         /* Ask for OpenXR 1.0, not the newest version the headers know. A runtime refuses a version
@@ -664,6 +669,8 @@ int ndvr_init(void *hdc, void *hglrc)
         if (XR_SUCCEEDED(fn.xrGetInstanceProperties(g_inst, &ip)))
             logf_("runtime: %s %u.%u.%u", ip.runtimeName, (unsigned)XR_VERSION_MAJOR(ip.runtimeVersion),
                   (unsigned)XR_VERSION_MINOR(ip.runtimeVersion), (unsigned)XR_VERSION_PATCH(ip.runtimeVersion));
+        g_cylinder = g_cylOffered;
+        logf_("curved panels (cylinder layers): %s", g_cylinder ? "yes" : "no, flat");
     }
 
     memset(&gi, 0, sizeof gi);
@@ -1001,7 +1008,7 @@ static struct {
     int used;                  /* submitted this frame */
     int opaque;
     XrPosef pose;
-    float wm, hm;
+    float wm, hm, radius;
 } g_panel;
 
 static void destroyPanel(void)
@@ -1062,8 +1069,10 @@ static void clearRect(int x, int y, int w, int h, float r, float g, float b)
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
+int ndvr_has_curved_panels(void) { return g_cylinder; }
+
 void ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int opaque, const ndvr_pose *pose,
-                       float width_m, float height_m, int cursor_x, int cursor_y)
+                       float width_m, float height_m, float radius_m, int hole_px, int cursor_x, int cursor_y)
 {
     XrSwapchainImageAcquireInfo ai;
     XrSwapchainImageWaitInfo wait;
@@ -1100,6 +1109,12 @@ void ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int o
     gl.bindFramebuffer(GL_DRAW_FRAMEBUFFER, g_panel.fbo[g_panel.acquired]);
     glDisable(GL_SCISSOR_TEST);
     gl.blitFramebuffer(0, 0, src_w, src_h, 0, flip_y ? H : 0, W, flip_y ? 0 : H, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (hole_px > 0) {                       /* clear the centre (the game's crosshair) to transparent */
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(W / 2 - hole_px / 2, H / 2 - hole_px / 2, hole_px, hole_px);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
     if (cursor_x >= 0 && cursor_y >= 0 && cursor_x < W && cursor_y < H) {
         int s = H / 90 > 4 ? H / 90 : 4, cy = H - 1 - cursor_y;   /* the image's top row is GL's last row */
         glEnable(GL_SCISSOR_TEST);
@@ -1119,7 +1134,7 @@ void ndvr_panel_submit(uint32_t src_fbo, int src_w, int src_h, int flip_y, int o
     g_panel.pose.orientation.x = pose->orientation.x; g_panel.pose.orientation.y = pose->orientation.y;
     g_panel.pose.orientation.z = pose->orientation.z; g_panel.pose.orientation.w = pose->orientation.w;
     g_panel.pose.position.x = pose->position.x; g_panel.pose.position.y = pose->position.y; g_panel.pose.position.z = pose->position.z;
-    g_panel.wm = width_m; g_panel.hm = height_m; g_panel.opaque = opaque; g_panel.used = 1;
+    g_panel.wm = width_m; g_panel.hm = height_m; g_panel.radius = g_cylinder && radius_m > 0 ? radius_m : 0; g_panel.opaque = opaque; g_panel.used = 1;
 }
 
 
@@ -1129,6 +1144,7 @@ void ndvr_end_frame(void)
     XrCompositionLayerProjectionView pv[2];
     XrCompositionLayerProjection proj;
     XrCompositionLayerQuad quad;
+    XrCompositionLayerCylinderKHR cyl;
     const XrCompositionLayerBaseHeader *layers[2];
     uint32_t nl = 0;
     uint32_t e;
@@ -1179,7 +1195,21 @@ void ndvr_end_frame(void)
         proj.views = pv;
         if (g_eyesWritten)                       /* menus: no 3D view this frame, only the panel */
             layers[nl++] = (const XrCompositionLayerBaseHeader *)&proj;
-        if (g_panel.used) {
+        if (g_panel.used && g_panel.radius > 0) {
+            memset(&cyl, 0, sizeof cyl);
+            cyl.type = XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR;
+            cyl.layerFlags = g_panel.opaque ? 0 : (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
+            cyl.space = g_local;
+            cyl.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            cyl.subImage.swapchain = g_panel.sc;
+            cyl.subImage.imageRect.extent.width = (int32_t)g_panel.w;
+            cyl.subImage.imageRect.extent.height = (int32_t)g_panel.h;
+            cyl.pose = g_panel.pose;                 /* the cylinder's centre (the viewer); the image is centred on its -Z */
+            cyl.radius = g_panel.radius;
+            cyl.centralAngle = g_panel.wm / g_panel.radius;
+            cyl.aspectRatio = g_panel.wm / g_panel.hm;
+            layers[nl++] = (const XrCompositionLayerBaseHeader *)&cyl;
+        } else if (g_panel.used) {
             memset(&quad, 0, sizeof quad);
             quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
             quad.layerFlags = g_panel.opaque ? 0 : (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
