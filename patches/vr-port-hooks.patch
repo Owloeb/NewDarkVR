@@ -40,7 +40,7 @@ index 04f05bb..3b9dcc5 100644
 +extern int vr_model_hook(CPU *c);
 +int fp_00627280(CPU *c) { return vr_model_hook(c); }
 diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
-index 048e661..3227d13 100644
+index 048e661..5c72415 100644
 --- a/port/dx/d3d9.c
 +++ b/port/dx/d3d9.c
 @@ -159,12 +159,25 @@ static void default_state(State *s, int zenable) {
@@ -88,7 +88,7 @@ index 048e661..3227d13 100644
          g->kx = 0.75f * vw / vh / zoom; g->ky = 0.75f / zoom;
          g->vp[0] = (float)h->s.vp[0]; g->vp[1] = (float)h->s.vp[1]; g->vp[2] = vw; g->vp[3] = vh; g->fogc = h->ps.fog_color;
          if (ppl_lit && ppl_debug != 1) { ppl_view_lights(g); for (int k = 0; k < 6; k++) g->sh[k] = ppl_shader(k / 2, k % 2); }
-@@ -865,15 +878,138 @@ static void ppl_hold(const void *blob, size_t total, int cls) {
+@@ -865,15 +878,160 @@ static void ppl_hold(const void *blob, size_t total, int cls) {
      ppl_dump_draw(h, v, ix, cls);
      grp_n += need; grp_cls = cls;
  }
@@ -200,7 +200,29 @@ index 048e661..3227d13 100644
 +    if (x0 <= 1 && y0 <= 1 && x1 >= (float)bw - 1 && y1 >= (float)bh - 1) { vr_hud_tex = t->pt; vr_hud_w = (int)t->w; vr_hud_h = (int)t->h; vr_hud_seen = 1; }
 +}
 +static void draw_inner(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint32_t stride, uint32_t idx, int idx32, int32_t base_vertex, uint32_t min_index, uint32_t num_vertices);
++/* NewDarkVR diagnostics: what the first-person weapon's draws look like when they reach Direct3D (per second in the log) */
++static struct { unsigned n, spilled, dropped, behind; float x0, x1, y0, y1, w0, w1; unsigned tgt[3]; } vr_ws = { .x0 = 1e30f, .y0 = 1e30f, .w0 = 1e30f, .x1 = -1e30f, .y1 = -1e30f, .w1 = -1e30f };
++static void vr_ws_note(Device *d, uint32_t vbase, uint32_t stride, uint32_t min_index, uint32_t nv, uint32_t prims, int how) {
++    Layout L; if (!current_layout(d, &L) || !L.rhw) return;
++    vr_ws.n++; if (how == 2) vr_ws.spilled++; if (how == 1) vr_ws.dropped++;
++    vr_ws.tgt[vr_eye_active ? 1 : 0]++;
++    if (!nv) nv = prims * 3; if (nv > 4096) nv = 4096;
++    for (uint32_t i = 0; i < nv; i++) {
++        uint32_t a = vbase + (min_index + i) * stride + (uint32_t)L.pos; float v[4]; if (!g_valid(a, 16)) break; memcpy(v, GP(a), 16);
++        if (!(v[3] > 0)) { vr_ws.behind++; continue; }
++        if (v[0] < vr_ws.x0) vr_ws.x0 = v[0]; if (v[0] > vr_ws.x1) vr_ws.x1 = v[0];
++        if (v[1] < vr_ws.y0) vr_ws.y0 = v[1]; if (v[1] > vr_ws.y1) vr_ws.y1 = v[1];
++        if (v[3] < vr_ws.w0) vr_ws.w0 = v[3]; if (v[3] > vr_ws.w1) vr_ws.w1 = v[3];
++    }
++}
++int vr_d3d_weapon_stats(char *buf, size_t n) {
++    int k = snprintf(buf, n, "weapon draws reaching Direct3D: %u (%u into an eye late, %u dropped as the camera pass's; %u while an eye renders), %u vertices behind the eye; x %.0f..%.0f y %.0f..%.0f, 1/z %.4f..%.4f",
++                     vr_ws.n, vr_ws.spilled, vr_ws.dropped, vr_ws.tgt[1], vr_ws.behind, vr_ws.x0, vr_ws.x1, vr_ws.y0, vr_ws.y1, vr_ws.w0, vr_ws.w1);
++    memset(&vr_ws, 0, sizeof vr_ws); vr_ws.x0 = vr_ws.y0 = vr_ws.w0 = 1e30f; vr_ws.x1 = vr_ws.y1 = vr_ws.w1 = -1e30f;
++    return k;
++}
  static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint32_t stride, uint32_t idx, int idx32, int32_t base_vertex, uint32_t min_index, uint32_t num_vertices) {
++    if (d->weapon_phase && d->st.rs[7] && vr_gun_mode != 1) vr_ws_note(d, vbase, stride, min_index, num_vertices, prims, vr_spill_how == 2 && vr_spill_t ? 2 : vr_spill_how);
 +    if (!vr_spill_how || !d->st.rs[7] || vr_gun_mode == 1) { draw_inner(d, type, prims, vbase, stride, idx, idx32, base_vertex, min_index, num_vertices); return; }
 +    if (vr_spill_how != 2 || !vr_spill_t) return;                 /* NewDarkVR: the camera pass's weapon, arriving late: not drawn */
 +    ppl_flush();                                                  /* NewDarkVR: the last eye's weapon, arriving late: into that eye */
@@ -227,7 +249,7 @@ index 048e661..3227d13 100644
      if (ps.shader) { PShader *p = d->st.ps->data; if (p->nconst) plat_gfx_shader_constants(0, p->nconst, d->psc[0]); }
      uint32_t *seq = scratch(d, (size_t)nseq * 4);
      uint32_t lo = 0xFFFFFFFFu, hi = 0;
-@@ -883,6 +1019,8 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+@@ -883,6 +1041,8 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
      }
      if (idx && num_vertices && hi - lo + 1 > num_vertices + min_index) { /* trust the indices */ }
      uint32_t span = hi - lo + 1;
@@ -236,7 +258,7 @@ index 048e661..3227d13 100644
      size_t maxidx = (size_t)nseq * 3 + 6;
      if (d->icap < (int)maxidx) { d->icap = (int)maxidx; d->ibuf = realloc(d->ibuf, (size_t)d->icap * sizeof *d->ibuf); }
      VState vs; vstate_of(&d->st, &vs);
-@@ -900,7 +1038,14 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+@@ -900,7 +1060,14 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
          memcpy(h + 1, GP(vbase + lo * stride), (size_t)span * stride);
          uint16_t *ix = (uint16_t *)((uint8_t *)(h + 1) + vbytes); for (int i = 0; i < n; i++) ix[i] = (uint16_t)e32[i];
          free(e32);
@@ -251,7 +273,7 @@ index 048e661..3227d13 100644
      } else if (span <= 65535) {                                       /* some vertex outside guest memory: per vertex, here */
          ppl_flush();
          if (d->vcap < (int)span) { d->vcap = (int)span; d->vbuf = realloc(d->vbuf, (size_t)d->vcap * sizeof *d->vbuf); }
-@@ -1274,7 +1419,9 @@ static void dev_reset(CPU *c, ComObj *s) {
+@@ -1274,7 +1441,9 @@ static void dev_reset(CPU *c, ComObj *s) {
  }
  static void dev_present(CPU *c, ComObj *s) {
      Device *d = DEV(s); (void)c;
@@ -262,7 +284,7 @@ index 048e661..3227d13 100644
      c->eax = 0;
  }
  static void dev_getbackbuffer(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || A(2)) { RET(D3DERR_INVALIDCALL); return; } com_addref(d->backbuf); OUTP(4, d->backbuf->guest); RET(0); }
-@@ -1371,7 +1518,7 @@ static void dev_colorfill(CPU *c, ComObj *s) {
+@@ -1371,7 +1540,7 @@ static void dev_colorfill(CPU *c, ComObj *s) {
      RET(0);
  }
  static void dev_setrt(CPU *c, ComObj *s) {
@@ -271,7 +293,7 @@ index 048e661..3227d13 100644
      Device *d = DEV(s); if (A(1) != 0) { RET(A(2) ? D3DERR_INVALIDCALL : 0); return; }
      ComObj *o = com_get(A(2)); if (!o) { RET(D3DERR_INVALIDCALL); return; }
      bind(&d->rt, o); plat_gfx_set_target(surface_target(R(o)));
-@@ -1381,11 +1528,14 @@ static void dev_setrt(CPU *c, ComObj *s) {
+@@ -1381,11 +1550,14 @@ static void dev_setrt(CPU *c, ComObj *s) {
  static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->rt) { OUTP(2, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->rt); OUTP(2, d->rt->guest); RET(0); }
  static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
  static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
@@ -289,7 +311,7 @@ index 048e661..3227d13 100644
      int color = (flags & 1) != 0, depth = (flags & 2) && d->ds, sten = (flags & 4) && d->ds;
      d->weapon_phase = (flags & 7) == 2 ? 1 : color ? 0 : d->weapon_phase;   /* the engine clears depth alone before the first-person weapon */
      if (!n || !rects) { plat_gfx_clear(color, A(4), depth, z, sten, A(6)); RET(0); return; }
-@@ -1591,3 +1741,21 @@ const ShimDef d3d9_shims[] = {
+@@ -1591,3 +1763,21 @@ const ShimDef d3d9_shims[] = {
      { "D3DXLoadSurfaceFromSurface", sh_D3DXLoadSurfaceFromSurface, STD(8) },
      { 0, 0, 0 }
  };

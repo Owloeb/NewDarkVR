@@ -604,7 +604,7 @@ static int vw_muzzle_aim(const ndvr_hand *hd, V3 *dir) {          /* aim so a sh
  * clips and draws the whole model in the eye itself, sub-objects (slide, recoil, reload) included. Its polygons reach
  * Direct3D one render late; port/dx/d3d9.c puts them into the right eye (vr_d3d_spill). */
 #define R3CTX 0x00a458b0u
-extern int vr_d3d_weapon_phase(void);
+extern int vr_d3d_weapon_phase(void); extern int vr_d3d_weapon_stats(char *buf, size_t n);
 extern void vr_d3d_spill(int how, PlatTexture *t, float ox, float oy, float kx, float ky);
 extern int vr_gun_cull_flip; extern float vr_ppl_zoom, vr_ppl_wzoom;   /* port/dx/d3d9.c */
 typedef struct { uint32_t model; double R[9], p[3], M[9], t[3]; } EngPose;
@@ -712,6 +712,7 @@ static void eng_log(void) {                                       /* about once 
     const ndvr_hand *hd = &fr.hand[hand_dom];
     port_debug("NDVR GUN: engine-drawn: %u models recorded in the camera pass (%u not near the camera), %u moved to the hand (pose turned with the aim %u, with the camera %u, fallback %u; last model-to-eye distance %.2f units), %u not recognised, %u without the scene's focal length; %s, hand %s",
                eng_n_rec, eng_n_far, eng_n_moved, eng_n_aim, eng_n_cam, eng_n_fallback, eng_last_dist, eng_n_unknown, eng_n_nofocal, gun_ready ? "rest position measured" : "measuring the rest position", hd->active ? "tracked" : "NOT tracked");
+    { char b[400]; vr_d3d_weapon_stats(b, sizeof b); port_debug("NDVR GUN: %s (window %dx%d)", b, gun_W, gun_H); }
     eng_n_rec = eng_n_moved = eng_n_unknown = eng_n_fallback = eng_n_nofocal = eng_n_aim = eng_n_cam = eng_n_far = 0;
 }
 
