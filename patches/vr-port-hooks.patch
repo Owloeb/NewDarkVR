@@ -1,8 +1,8 @@
 diff --git a/port/CMakeLists.txt b/port/CMakeLists.txt
-index 00dd761..572f722 100644
+index b367888..0f01f32 100644
 --- a/port/CMakeLists.txt
 +++ b/port/CMakeLists.txt
-@@ -85,6 +85,9 @@ add_executable(ss2port ${SYS_SRC} ${BACKEND_SRC} $<TARGET_OBJECTS:game>)
+@@ -93,6 +93,9 @@ add_executable(ss2port ${SYS_SRC} ${BACKEND_SRC} $<TARGET_OBJECTS:game>)
  target_include_directories(ss2port PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
  target_compile_definitions(ss2port PRIVATE ${GEN_DEFS})
  target_link_libraries(ss2port PRIVATE portcore)
@@ -13,10 +13,10 @@ index 00dd761..572f722 100644
    target_link_libraries(ss2port PRIVATE m)
  endif()
 diff --git a/port/backends/sdl2/gl_render.c b/port/backends/sdl2/gl_render.c
-index fc6c047..5d105e3 100644
+index b2d8ce3..9c8143f 100644
 --- a/port/backends/sdl2/gl_render.c
 +++ b/port/backends/sdl2/gl_render.c
-@@ -419,3 +419,7 @@ void gl_resize_backbuffer(int w, int h) {
+@@ -453,3 +453,7 @@ void gl_resize_backbuffer(int w, int h) {
      bind_target(&bb); target = &bb; cur_vp = (PlatViewport){ 0, 0, w, h, 0, 1 }; glViewport(0, 0, w, h); sc_on = 0; apply_scissor();
      glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
  }
@@ -25,28 +25,29 @@ index fc6c047..5d105e3 100644
 +unsigned vr_gl_tex_fbo(PlatTexture *t, int *w, int *h) { ensure_fbo(t); *w = t->w; *h = t->h; return t->fbo; }
 +unsigned vr_gl_bb_fbo(int *w, int *h) { ensure_fbo(&bb); *w = bb.w; *h = bb.h; return bb.fbo; }   /* NewDarkVR: the back buffer, for menus in the headset */
 diff --git a/port/core/fastpaths.c b/port/core/fastpaths.c
-index ba13283..f90af07 100644
+index 04f05bb..13a316b 100644
 --- a/port/core/fastpaths.c
 +++ b/port/core/fastpaths.c
-@@ -142,3 +142,7 @@ int fp_006ebc90(CPU *c) {
-     c->eax = dst; c->edx = bm; c->ecx = (uint32_t)w;
-     return 1;
+@@ -201,3 +201,7 @@ int fp_005ed7d0(CPU *c) {
+     ppl_lights_dump(c);
+     return 0;
  }
 +
 +/* ---- NewDarkVR: render_scene_from_camera (0x00601430) -> port/core/vr_stereo.c ---- */
 +extern int vr_scene_hook(CPU *c);
 +int fp_00601430(CPU *c) { return vr_scene_hook(c); }
 diff --git a/port/dx/d3d9.c b/port/dx/d3d9.c
-index 413e0da..eafce69 100644
+index 048e661..d315251 100644
 --- a/port/dx/d3d9.c
 +++ b/port/dx/d3d9.c
-@@ -151,11 +151,21 @@ static void default_state(State *s, int zenable) {
+@@ -159,12 +159,22 @@ static void default_state(State *s, int zenable) {
      for (int i = 0; i < MAX_LIGHTS; i++) { s->light[i].type = 3; s->light[i].diffuse[0] = s->light[i].diffuse[1] = s->light[i].diffuse[2] = 1.0f; s->light[i].dir[2] = 1.0f; }
      s->vp[4] = f2u(0.0f); s->vp[5] = f2u(1.0f);
  }
 +/* NewDarkVR: while set, the engine's canvas pixels map to target pixels as x' = ox + x * kx, y' = oy + y * ky (port/core/vr_stereo.c) */
 +static int vr_vpo; static float vr_vpo_ox, vr_vpo_oy, vr_vpo_kx, vr_vpo_ky;
  static void apply_viewport(Device *d) {
+     ppl_flush();
      PlatViewport v = { (int)d->st.vp[0], (int)d->st.vp[1], (int)d->st.vp[2], (int)d->st.vp[3], u2f(d->st.vp[4]), u2f(d->st.vp[5]) };
 +    int sx = d->st.scissor[0], sy = d->st.scissor[1], sw = d->st.scissor[2] - d->st.scissor[0], sh = d->st.scissor[3] - d->st.scissor[1];
 +    if (vr_vpo) {
@@ -63,9 +64,9 @@ index 413e0da..eafce69 100644
  static void target_size(Device *d, uint32_t *w, uint32_t *h) {
      Res *r = R(d->rt); if (!r || r->backbuffer) { *w = d->bb_w; *h = d->bb_h; return; }
      if (r->container) { Res *t = R(r->container); *w = level_w(t, r->level); *h = level_h(t, r->level); } else { *w = r->w; *h = r->h; }
-@@ -410,9 +420,106 @@ static void deferred_draw(void *data, PlatDrawFn submit) {             /* on the
-     for (int i = 0; i < h->nidx; i++) { uint16_t r = ix[i]; if (!done[r]) { done[r] = 1; vertex(&h->s, &h->L, &h->x, raw + (size_t)r * h->stride, &out[r]); } }
-     submit(h->prim, out, (int)h->span, ix, h->nidx, &h->ps);
+@@ -865,9 +875,106 @@ static void ppl_hold(const void *blob, size_t total, int cls) {
+     ppl_dump_draw(h, v, ix, cls);
+     grp_n += need; grp_cls = cls;
  }
 +/* NewDarkVR calibration (port/core/vr_stereo.c): while vr_cap_on, record x, y, rhw of every pre-transformed vertex drawn */
 +int vr_cap_on, vr_cap_n, vr_cap_max; float *vr_cap_buf;
@@ -124,7 +125,7 @@ index 413e0da..eafce69 100644
 +                     memset(vr_gun_mom, 0, sizeof vr_gun_mom); memset(vr_gun_rgb, 0, sizeof vr_gun_rgb); }
 +}
 +void vr_d3d_gun_replay_eye(PlatTexture *t, float ox, float oy, float kx, float ky, int W, int H, const float *m, int mirror, float f) {
-+    if (vr_gun_mode == 3) vr_gun_mode = 0;
++    ppl_flush(); if (vr_gun_mode == 3) vr_gun_mode = 0;
 +    if (!vr_gun_len || !t) return;
 +    plat_gfx_set_target(t);
 +    PlatViewport vp = { (int)lroundf(ox), (int)lroundf(oy), (int)lroundf(W * kx), (int)lroundf(H * ky), 0.0f, 1.0f }; plat_gfx_viewport(&vp);
@@ -168,9 +169,9 @@ index 413e0da..eafce69 100644
      if (!prims || !prim_counts(type, prims, &nseq, &plat_prim)) return;
 +    if (vr_gun_mode == 1) return;                                /* NewDarkVR camera pass: draws nothing */
      Layout L; if (!current_layout(d, &L)) return;
+     trace_draw(&L, prims, type, d);
      if (!stride) stride = (uint32_t)L.stride;
-     if (!d->in_scene) { static int w; if (!w++) port_debug("Direct3D: draw outside BeginScene/EndScene"); }
-@@ -426,6 +533,8 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+@@ -883,6 +990,8 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
      }
      if (idx && num_vertices && hi - lo + 1 > num_vertices + min_index) { /* trust the indices */ }
      uint32_t span = hi - lo + 1;
@@ -179,7 +180,7 @@ index 413e0da..eafce69 100644
      size_t maxidx = (size_t)nseq * 3 + 6;
      if (d->icap < (int)maxidx) { d->icap = (int)maxidx; d->ibuf = realloc(d->ibuf, (size_t)d->icap * sizeof *d->ibuf); }
      VState vs; vstate_of(&d->st, &vs);
-@@ -438,7 +547,14 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
+@@ -900,7 +1009,14 @@ static void draw(Device *d, uint32_t type, uint32_t prims, uint32_t vbase, uint3
          memcpy(h + 1, GP(vbase + lo * stride), (size_t)span * stride);
          uint16_t *ix = (uint16_t *)((uint8_t *)(h + 1) + vbytes); for (int i = 0; i < n; i++) ix[i] = (uint16_t)e32[i];
          free(e32);
@@ -188,44 +189,48 @@ index 413e0da..eafce69 100644
 +            if (L.rhw) vr_gun_keep(blob, total, h, L.pos, t0 ? (int)t0->w : 0, t0 ? (int)t0->h : 0, L.diffuse);
 +            return;
 +        }
-         plat_gfx_deferred(deferred_draw, blob, total);
+         if (h->obj) ppl_hold(blob, total, h->obj); else { ppl_flush(); plat_gfx_deferred(deferred_draw, blob, total); }
 +    } else if (vr_gun_mode == 3 && vr_vm_phase) {                     /* NewDarkVR: the weapon is only kept */
 +        return;
      } else if (span <= 65535) {                                       /* some vertex outside guest memory: per vertex, here */
+         ppl_flush();
          if (d->vcap < (int)span) { d->vcap = (int)span; d->vbuf = realloc(d->vbuf, (size_t)d->vcap * sizeof *d->vbuf); }
-         uint8_t *used = calloc(span, 1);
-@@ -789,6 +905,7 @@ static void dev_reset(CPU *c, ComObj *s) {
+@@ -1274,7 +1390,9 @@ static void dev_reset(CPU *c, ComObj *s) {
  }
  static void dev_present(CPU *c, ComObj *s) {
      Device *d = DEV(s); (void)c;
+-    ppl_flush(); trace_frame_end(); plat_gfx_present(); port_frame_presented(); plat_gfx_begin_frame(); plat_gfx_set_target(surface_target(R(d->rt))); apply_viewport(d);
++    ppl_flush(); trace_frame_end();
 +    { extern void vr_frame_present(void); vr_frame_present(); }   /* NewDarkVR: the headset frame ends here (port/core/vr_stereo.c) */
-     plat_gfx_present(); port_frame_presented(); plat_gfx_begin_frame(); plat_gfx_set_target(surface_target(R(d->rt))); apply_viewport(d);
++    plat_gfx_present(); port_frame_presented(); plat_gfx_begin_frame(); plat_gfx_set_target(surface_target(R(d->rt))); apply_viewport(d);
      c->eax = 0;
  }
-@@ -892,10 +1009,13 @@ static void dev_setrt(CPU *c, ComObj *s) {
+ static void dev_getbackbuffer(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || A(2)) { RET(D3DERR_INVALIDCALL); return; } com_addref(d->backbuf); OUTP(4, d->backbuf->guest); RET(0); }
+@@ -1381,11 +1499,14 @@ static void dev_setrt(CPU *c, ComObj *s) {
  static void dev_getrt(CPU *c, ComObj *s) { Device *d = DEV(s); if (A(1) || !d->rt) { OUTP(2, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->rt); OUTP(2, d->rt->guest); RET(0); }
  static void dev_setds(CPU *c, ComObj *s) { Device *d = DEV(s); bind(&d->ds, com_get(A(1))); RET(0); }
  static void dev_getds(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->ds) { OUTP(1, 0); RET(D3DERR_NOTFOUND); return; } com_addref(d->ds); OUTP(1, d->ds->guest); RET(0); }
 -static void dev_beginscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 1; RET(0); }
--static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; RET(0); }
+-static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); ppl_flush(); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; d->weapon_phase = 0; RET(0); }
 +static Device *g_vr_dev;   /* NewDarkVR: the device, for vr_d3d_* below */
 +static void dev_beginscene(CPU *c, ComObj *s) { Device *d = DEV(s); g_vr_dev = d; if (d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 1; RET(0); }
-+static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; if (vr_gun_mode == 3) vr_gun_mode = 0; RET(0); }
++static void dev_endscene(CPU *c, ComObj *s) { Device *d = DEV(s); ppl_flush(); if (!d->in_scene) { RET(D3DERR_INVALIDCALL); return; } d->in_scene = 0; d->weapon_phase = 0; if (vr_gun_mode == 3) vr_gun_mode = 0; RET(0); }
  static void dev_clear(CPU *c, ComObj *s) {
+     ppl_flush();
      Device *d = DEV(s); uint32_t n = A(1), rects = A(2), flags = A(3); float z = u2f(A(5));
 +    if (vr_gun_mode == 3 && (flags & 7) == 2) vr_vm_phase = 1;        /* NewDarkVR: what follows is the held weapon */
 +    if (vr_gun_mode == 1) { if ((flags & 7) == 2) vr_gun_zseen = 1; RET(0); return; }   /* NewDarkVR camera pass: clears nothing */
      int color = (flags & 1) != 0, depth = (flags & 2) && d->ds, sten = (flags & 4) && d->ds;
+     d->weapon_phase = (flags & 7) == 2 ? 1 : color ? 0 : d->weapon_phase;   /* the engine clears depth alone before the first-person weapon */
      if (!n || !rects) { plat_gfx_clear(color, A(4), depth, z, sten, A(6)); RET(0); return; }
-     for (uint32_t i = 0; i < n; i++) { uint32_t r = rects + 16 * i; plat_gfx_scissor(1, (int32_t)RD32(r), (int32_t)RD32(r + 4), (int32_t)(RD32(r + 8) - RD32(r)), (int32_t)(RD32(r + 12) - RD32(r + 4))); plat_gfx_clear(color, A(4), depth, z, sten, A(6)); }
-@@ -1068,3 +1188,18 @@ const ShimDef d3d9_shims[] = {
+@@ -1591,3 +1712,18 @@ const ShimDef d3d9_shims[] = {
      { "D3DXLoadSurfaceFromSurface", sh_D3DXLoadSurfaceFromSurface, STD(8) },
      { 0, 0, 0 }
  };
 +
 +/* ---- NewDarkVR (port/core/vr_stereo.c): redirect the engine's draws into an eye texture and back. ---- */
 +void vr_d3d_eye_begin(PlatTexture *t, int w, int h) {
-+    vr_eye_active = 1; vr_vm_phase = 0;
++    ppl_flush(); vr_eye_active = 1; vr_vm_phase = 0;
 +    plat_gfx_set_target(t);
 +    plat_gfx_scissor(0, 0, 0, w, h);
 +    PlatViewport v = { 0, 0, w, h, 0.0f, 1.0f }; plat_gfx_viewport(&v);
@@ -233,7 +238,7 @@ index 413e0da..eafce69 100644
 +    if (g_vr_dev) apply_viewport(g_vr_dev);                         /* the engine's own viewport and scissor again */
 +}
 +void vr_d3d_restore(void) {
-+    vr_eye_active = vr_vm_phase = 0;
++    ppl_flush(); vr_eye_active = vr_vm_phase = 0;
 +    if (!g_vr_dev) return;
 +    plat_gfx_set_target(surface_target(R(g_vr_dev->rt))); apply_viewport(g_vr_dev);
 +}

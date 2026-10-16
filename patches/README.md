@@ -1,6 +1,8 @@
 # Patches against NewDarkRecompiled
 
-Applied to a checkout of `Owloeb/NewDarkRecompiled` at `1fd62bd` with `git apply patches/<name>.patch`.
+`vr-port-hooks.patch` and `m5-hud-weapon-probe.patch` apply to `Owloeb/NewDarkRecompiled` main at `3e39338` (pixel shaders and per-pixel lighting; the
+VR hooks flush held per-pixel-lit draws before switching to an eye or the gun replay). The older diagnostic patches
+(m2, m3a, m3b) were made against `1fd62bd` and are kept for reference.
 The vanilla repo is never modified from here.
 
 ## m2-d3d9-stats.patch
