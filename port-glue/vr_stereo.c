@@ -615,6 +615,7 @@ static uint32_t eng_g0_model; static int eng_g0_n; static double eng_g0_sum[3];
 static unsigned eng_n_rec, eng_n_moved, eng_n_fallback, eng_n_unknown, eng_n_nofocal, eng_n_aim, eng_n_cam, eng_n_far;
 static double eng_last_dist;
 
+static double eng_TN[9], eng_Tc[3], eng_TQ[9], eng_Tu[3], eng_Tf[2]; static int eng_T_ok;   /* this eye render's move, set by its first weapon part */
 static void ctx_rd(uint32_t a, double *d, int n) { for (int i = 0; i < n; i++) d[i] = rdf(a + 4u * (uint32_t)i); }
 static void ctx_wr(uint32_t a, const double *d, int n) { for (int i = 0; i < n; i++) wrf(a + 4u * (uint32_t)i, (float)d[i]); }
 static void eng_restore(void) {
@@ -622,6 +623,13 @@ static void eng_restore(void) {
     WR32(eng_sv_ctx + 4, eng_sv[0]); WR32(eng_sv_ctx + 8, eng_sv[1]);
     for (uint32_t i = 0; i < 12; i++) { WR32(eng_sv_ctx + 0x78 + 4 * i, eng_sv[2 + i]); WR32(eng_sv_ctx + 0xac + 4 * i, eng_sv[14 + i]); }
     eng_sv_on = 0;
+}
+static void eng_apply(uint32_t ctx) {                             /* the camera the weapon parts are drawn with (put back at the next model) */
+    eng_sv_ctx = ctx; eng_sv[0] = RD32(ctx + 4); eng_sv[1] = RD32(ctx + 8);
+    for (uint32_t i = 0; i < 12; i++) { eng_sv[2 + i] = RD32(ctx + 0x78 + 4 * i); eng_sv[14 + i] = RD32(ctx + 0xac + 4 * i); }
+    eng_sv_on = 1;
+    wrf(ctx + 4, (float)eng_Tf[0]); wrf(ctx + 8, (float)eng_Tf[1]);
+    ctx_wr(ctx + 0x78, eng_TN, 9); ctx_wr(ctx + 0x9c, eng_Tc, 3); ctx_wr(ctx + 0xac, eng_TQ, 9); ctx_wr(ctx + 0xd0, eng_Tu, 3);
 }
 static void eng_read(uint32_t ctx, uint32_t model, EngPose *e) {
     e->model = model; ctx_rd(ctx + 0x44, e->R, 9); ctx_rd(ctx + 0x68, e->p, 3); ctx_rd(ctx + 0x78, e->M, 9); ctx_rd(ctx + 0x9c, e->t, 3);
@@ -667,9 +675,13 @@ int vr_model_hook(CPU *c) {
         }
         return 0;
     }
-    int k = 0; while (k < eng_nrec && eng_rec[k].model != cur.model) k++;
-    if (k == eng_nrec || !gun_ready) { eng_n_unknown++; return 0; }   /* not seen in the camera pass: drawn where the engine puts it */
-    const EngPose *r = &eng_rec[k];
+    /* One transform for the whole weapon: the engine places all of its parts (weapon, arm, hands) from the same player pose
+     * in one render, so the first part's move (against the first part of the camera pass) is applied to every part that
+     * follows, which keeps them where the engine put them relative to each other. A move worked out per part went wrong
+     * for the later parts (the slide followed the hand, the rest hung off in a different place). */
+    if (eng_T_ok) { eng_apply(ctx); eng_n_moved++; return 0; }
+    if (!eng_nrec || !gun_ready) { eng_n_unknown++; return 0; }   /* nothing recorded: drawn where the engine puts it */
+    const EngPose *r = &eng_rec[0];
     double sx = eng_sf[0], sy = eng_sf[1];
     if (!(sx > 0 && sy > 0)) { sx = rdf(ctx + 4); sy = rdf(ctx + 8); eng_n_nofocal++; }
     /* This render's pose of the model (e) is trusted when it is near this render's camera and turned either as in the
@@ -695,14 +707,12 @@ int vr_model_hook(CPU *c) {
     row_mul(pe, X, w); for (int i = 0; i < 3; i++) w[i] = r->p[i] - w[i];
     row_mul(w, r->M, w2); for (int i = 0; i < 3; i++) w2[i] += r->t[i];
     row_mul(w2, AT, c0); for (int i = 0; i < 3; i++) c0[i] += gun_m[i * 4 + 3];
-    eng_sv_ctx = ctx; eng_sv[0] = RD32(ctx + 4); eng_sv[1] = RD32(ctx + 8);
-    for (uint32_t i = 0; i < 12; i++) { eng_sv[2 + i] = RD32(ctx + 0x78 + 4 * i); eng_sv[14 + i] = RD32(ctx + 0xac + 4 * i); }
-    eng_sv_on = 1;
-    double Q[9], u[3], s3[3] = { sx, sy, 1 };
-    for (int i = 0; i < 9; i++) Q[i] = N[i] * s3[i % 3];
-    for (int j = 0; j < 3; j++) u[j] = c0[j] * s3[j];
-    wrf(ctx + 4, (float)sx); wrf(ctx + 8, (float)sy);
-    ctx_wr(ctx + 0x78, N, 9); ctx_wr(ctx + 0x9c, c0, 3); ctx_wr(ctx + 0xac, Q, 9); ctx_wr(ctx + 0xd0, u, 3);
+    double s3[3] = { sx, sy, 1 };
+    memcpy(eng_TN, N, sizeof N); memcpy(eng_Tc, c0, sizeof c0);
+    for (int i = 0; i < 9; i++) eng_TQ[i] = N[i] * s3[i % 3];
+    for (int j = 0; j < 3; j++) eng_Tu[j] = c0[j] * s3[j];
+    eng_Tf[0] = sx; eng_Tf[1] = sy; eng_T_ok = 1;
+    eng_apply(ctx);
     eng_n_moved++;
     return 0;
 }
@@ -980,7 +990,7 @@ int vr_scene_hook(CPU *c) {
             eye_map[e][0] = (float)((-th - L) * px); eye_map[e][1] = (float)((U - tv) * py); eye_map[e][2] = (float)(2 * th * px / W); eye_map[e][3] = (float)(2 * tv * py / H);
             sub.fov[e] = *f;
             vr_d3d_eye_begin(hmd_tex[e], tw, tht);
-            if (eng) { gun_setup(ep); vr_gun_cull_flip = gun_mirror; eng_sf[0] = eng_sf[1] = 0; eng_pass = 2; }
+            if (eng) { gun_setup(ep); vr_gun_cull_flip = gun_mirror; eng_sf[0] = eng_sf[1] = 0; eng_T_ok = 0; eng_pass = 2; }
             nd_00601430(c);
             if (eng) { eng_restore(); eng_pass = 0; vr_d3d_spill(2, hmd_tex[e], eye_map[e][0], eye_map[e][1], eye_map[e][2], eye_map[e][3]); }
             continue;
