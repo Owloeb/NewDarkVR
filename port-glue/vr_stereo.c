@@ -57,7 +57,7 @@
  *                      engine (default): the engine draws its own first-person model (arm included with the 25th
  *                        Anniversary models, tools/convert_remaster.py) at the hand in each eye, whole, with its own
  *                        materials, lighting, recoil and reload (see "the weapon drawn by the engine")
- *                      capture: the first-person draws of one extra render, moved to the hand (older; only what the
+ *                      capture: the first-person draws of one extra render, moved to the hand, pivoting about the model's origin (the grip); only what the
  *                        engine shows from its own view, so parts are missing)
  *                      world: the weapon's floor model (needs vr/weapons.vrw from tools/extract_weapons.py)
  *   NDVR_GUN_X / NDVR_GUN_Y / NDVR_GUN_Z   move the weapon in the hand, in cm (right, up, forward; default 0)
@@ -147,6 +147,9 @@ static float eye_map[2][4]; static float gun_f_eye; static int gun_W, gun_H;
 extern int vr_gun_dtw[VR_GUN_MAXD], vr_gun_dth[VR_GUN_MAXD], vr_gun_dtris[VR_GUN_MAXD]; extern double vr_gun_mom[10], vr_gun_rgb[4];
 static double gun_zero_m = 10; static int gun_ontop, gun_use_world, eng_mode = 1, gun_mirror_on = 1;   /* eng_mode: 1 engine, 2 capture, 3 world */
 static float gun_m[12]; static int gun_mirror;
+/* capture mode's pivot: the weapon model's own origin (where the game holds it: the grip), read as the engine sets the model up,
+ * not the middle of the captured vertices (which, with the arm in the model, lies well forward of the hand) */
+static int cap_o_first, cap_o_n, cap_o_ok, cap_o_seen; static uint32_t cap_o_model; static double cap_o_sum[3], cap_o[3];
 static int gun_enabled = 1, gun_ready, gun_frames, gun_ref_nv, gun_odd; static double gun_scale = 1, gun_off[3], gun_sum[3], gun_g0[3];
 
 static void xr_log(const char *line) { port_debug("NDVR: %s", line); }
@@ -368,12 +371,14 @@ static void gun_measure(void) {                                   /* after the c
     }
     gun_odd = 0;
     if (gun_ready) return;
+    if (cap_o_seen > 0) cap_o_seen--;
     for (int i = 0; i < 3; i++) gun_sum[i] += 0.5 * (vr_gun_bmin[i] + vr_gun_bmax[i]);
     if (++gun_frames == 1) gun_ref_nv = nv;
     if (gun_frames >= 30) {
-        for (int i = 0; i < 3; i++) { gun_g0[i] = gun_sum[i] / gun_frames; gun_sum[i] = 0; }
+        if (cap_o_seen > 0 && !cap_o_ok) { gun_frames = 29; gun_sum[0] = gun_sum[1] = gun_sum[2] = 0; return; }   /* the model's origin is still being measured */
+        for (int i = 0; i < 3; i++) { gun_g0[i] = cap_o_ok ? cap_o[i] : gun_sum[i] / gun_frames; gun_sum[i] = 0; }
         gun_ready = 1; gun_ref_nv = nv;
-        port_debug("NDVR: weapon rest position %.2f %.2f %.2f (camera units, %d vertices); now on the %s hand", gun_g0[0], gun_g0[1], gun_g0[2], nv, hand_dom ? "right" : "left");
+        port_debug("NDVR: weapon %s %.2f %.2f %.2f (camera units, %d vertices); now on the %s hand", cap_o_ok ? "pivot (the model's origin, the grip)" : "rest position (middle of the captured box)", gun_g0[0], gun_g0[1], gun_g0[2], nv, hand_dom ? "right" : "left");
     }
 }
 
@@ -643,8 +648,21 @@ static void row_mul(const double *v, const double *A, double *o) { for (int j = 
 static void cam_pos(const EngPose *e, double *c) {                /* the camera's world position: -t M^T */
     for (int i = 0; i < 3; i++) c[i] = -(e->t[0] * e->M[i * 3] + e->t[1] * e->M[i * 3 + 1] + e->t[2] * e->M[i * 3 + 2]);
 }
+static void cap_origin(CPU *c) {                                  /* capture mode: where the game puts the first weapon model's origin */
+    if (!cap_o_first) return;
+    uint32_t ctx = RD32(R3CTX); if (!ctx || !g_valid(ctx, 0xdc)) return;
+    EngPose e; eng_read(ctx, c->eax, &e); if (!eng_sane(&e)) return;
+    cap_o_first = 0; cap_o_seen = 3;
+    double cc[3]; cam_pos(&e, cc);
+    if (!((e.p[0] - cc[0]) * (e.p[0] - cc[0]) + (e.p[1] - cc[1]) * (e.p[1] - cc[1]) + (e.p[2] - cc[2]) * (e.p[2] - cc[2]) < 64)) return;
+    double o[3]; row_mul(e.p, e.M, o); for (int i = 0; i < 3; i++) o[i] += e.t[i];
+    if (e.model != cap_o_model) { cap_o_model = e.model; cap_o_n = 0; cap_o_ok = 0; cap_o_sum[0] = cap_o_sum[1] = cap_o_sum[2] = 0; gun_ready = 0; gun_frames = 0; gun_sum[0] = gun_sum[1] = gun_sum[2] = 0; }
+    if (cap_o_ok) return;
+    for (int i = 0; i < 3; i++) cap_o_sum[i] += o[i];
+    if (++cap_o_n >= 30) { for (int i = 0; i < 3; i++) cap_o[i] = cap_o_sum[i] / cap_o_n; cap_o_ok = 1; }
+}
 int vr_model_hook(CPU *c) {
-    if (!eng_pass) return 0;
+    if (!eng_pass) { if (eng_mode == 2 && gun_enabled && vr_d3d_weapon_phase()) cap_origin(c); return 0; }
     eng_restore();
     uint32_t ctx = RD32(R3CTX);
     if (!ctx || !g_valid(ctx, 0xdc)) return 0;
@@ -1014,7 +1032,7 @@ int vr_scene_hook(CPU *c) {
     memcpy(GP(CAM_COPY), keep_copy, sizeof keep_copy);             /* everything else sees the engine's own camera, */
     if (mode == 2) memcpy(GP(CAM_COPY), keep_cam, 24);            /* as the original would have left it (sound, culling, the aim below) */
     vr_d3d_restore();
-    if (mode == 2 && gun_enabled && !eng) vr_d3d_gun_pass(3, (float)(H * 0.5 / 1.5), W * 0.5f, H * 0.5f);   /* keep the weapon the engine draws next */
+    if (mode == 2 && gun_enabled && !eng) { vr_d3d_gun_pass(3, (float)(H * 0.5 / 1.5), W * 0.5f, H * 0.5f); cap_o_first = 1; }   /* keep the weapon the engine draws next */
     if (mode == 1) {
         plat_gfx_copy(eye_tex[0], 0, 0, W, H, NULL, 0, 0, W / 2, H, 1);
         plat_gfx_copy(eye_tex[1], 0, 0, W, H, NULL, W / 2, 0, W - W / 2, H, 1);
