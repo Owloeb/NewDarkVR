@@ -181,3 +181,30 @@ the captured weapon now and its measured rest pose, and apply that move to the f
 match the captured draw (vertex / triangle counts, box shape) against the *_h.bin models read from the install at
 start-up, then load the matching *_w.bin. Grip point and barrel axis per world model: from its shape (the long axis
 is the barrel), with per-weapon overrides.
+
+## The first-person model back, drawn by the engine at the hand
+
+With the 25th Anniversary models (whole weapons with the arm) the first-person model is the one to show, but moving
+captured screen-space triangles can never work: the engine drops back faces and clips at the edges of its own view.
+So the engine now draws it itself in each eye, from a camera that puts it at the hand. Hook on md_set_model
+(0x627280); its r3 context (*0xa458b0), worked out from the SS2PORT_PPL_LIGHTS dumps:
+
+| offset | contents |
+|---|---|
+| +0x04, +0x08 | focal lengths x, y in pixels * 65536 (480 * 65536 at 720 lines, zoom 1) |
+| +0x44 | the (sub)object's world rotation, rows; world = v R + p |
+| +0x68 | its world position |
+| +0x78, +0x9c | the camera: view = world M + t, view x right, y down, z forward (t = -camera position M) |
+| +0xac, +0xd0 | M and t with columns x, y scaled by the focal lengths |
+| +0xe0 | R Q for the current sub-object (recomputed per sub-object) |
+
+In the light dumps the player's weapon (several sub-objects, rotations per joint) sits about 1.6 units ahead, 0.5
+right and 0.8 down from the camera. The camera pass now comes first and records each first-person model's pose; in
+each eye render the camera fields are replaced while that model is drawn (and put back at the next model), so that
+view = K(camera-pass view of the same point), K = the hand seen from the eye. The model's origin in the camera pass is
+the rest position held at the controller. Its polygons reach Direct3D at the engine's next flush (the next render's
+first clear), so d3d9.c sends depth-tested draws arriving then to the eye just finished (vr_d3d_spill). Per-pixel
+lighting is given the eye renders' zoom (it assumed 1) and the weapon's.
+
+To check in the log (`NDVR GUN: engine-drawn:` once a second): models recorded and moved each frame, which pose
+rule matched (turned with the aim, with the camera, or the fallback), and whether the scene's focal length was found.

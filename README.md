@@ -64,12 +64,14 @@ and videos use it too; it holds still while a cursor is up). The gun
 hand (`$env:NDVR_HAND="left"` for left-handed) aims: the game's mouse look follows the controller, so shots go where
 it points. Trigger = fire / click, A or X = use (right mouse button), B or Y = Tab (inventory; the hand then points
 at the panel with a cursor), thumbstick left/right = snap turn, left menu button = recentre.
-The weapon in your hand is the game's own floor (world) model, which is modelled all the way round, drawn double-sided
-and moved with the game's recoil and reload dip; shots are zeroed to cross its barrel line 10 m out (`NDVR_ZERO`).
-It needs a one-time extraction from your install (nothing is copied from anywhere else):
-`python3 ~/NewDarkVR/tools/extract_weapons.py "/mnt/n/System Shock 2"` writes `vr/weapons.vrw` into the game folder.
-Without that file, or for a weapon it doesn't recognise, the first-person model is shown instead. `NDVR_GUN_X/Y/Z` (cm)
-move it in the hand, `NDVR_GUN_SCALE` sizes it, `NDVR_GUN_ONTOP=1` stops walls hiding it. Walking is still on the keyboard, relative to where the gun points. All tuning variables are listed at the
+The weapon in your hand is the game's own first-person model (weapon and arm), drawn by the engine itself in each eye
+at the controller: whole, with its own materials, lighting, recoil and reload. For the full models use the 25th
+Anniversary ones from your own copy of the Remaster (`tools/convert_remaster.py`); the original game's first-person
+models are open shells built for one view. `NDVR_GUN_X/Y/Z` (cm) move it in the hand, `NDVR_GUN_SCALE` sizes it,
+`NDVR_GUN_MIRROR=0` keeps it unmirrored in the left hand. It is drawn over walls, as in the game.
+The earlier ways are still there: `NDVR_GUN_MODE=world` (the floor model, after a one-time
+`python3 ~/NewDarkVR/tools/extract_weapons.py "/mnt/n/System Shock 2"`) and `NDVR_GUN_MODE=capture`.
+Walking is still on the keyboard, relative to where the gun points. All tuning variables are listed at the
 top of `port-glue/vr_stereo.c`. `python3 NewDarkVR/tools/install_into_port.py ~/NewDarkRecompiled --uninstall` puts your
 checkout back to vanilla.
 

@@ -53,12 +53,19 @@
  *   NDVR_HUD_PULL / NDVR_HUD_LIFT   in play, the HUD's left and right edges (health, ammo) are moved this many degrees
  *                    in towards the middle / up (default 12 / 6)
  *   NDVR_GUN         0 to leave the weapon where the game draws it
+ *   NDVR_GUN_MODE    how the weapon gets into the hand:
+ *                      engine (default): the engine draws its own first-person model (arm included with the 25th
+ *                        Anniversary models, tools/convert_remaster.py) at the hand in each eye, whole, with its own
+ *                        materials, lighting, recoil and reload (see "the weapon drawn by the engine")
+ *                      capture: the first-person draws of one extra render, moved to the hand (older; only what the
+ *                        engine shows from its own view, so parts are missing)
+ *                      world: the weapon's floor model (needs vr/weapons.vrw from tools/extract_weapons.py)
  *   NDVR_GUN_X / NDVR_GUN_Y / NDVR_GUN_Z   move the weapon in the hand, in cm (right, up, forward; default 0)
  *   NDVR_GUN_SCALE   weapon size (default 1)
- *   NDVR_GUN_WORLD   0 to show the game's first-person model instead of the world model (needs vr/weapons.vrw from
- *                    tools/extract_weapons.py; without it the first-person model is shown)
+ *   NDVR_GUN_MIRROR  0 to keep the left hand's weapon unmirrored (default 1: mirrored, as the right hand's in a mirror)
  *   NDVR_ZERO        metres at which shots cross the world model's barrel line (default 10; 0 = along the controller)
- *   NDVR_GUN_ONTOP   1 to draw the weapon over walls instead of letting them hide it
+ *   NDVR_GUN_ONTOP   1 to draw the weapon over walls instead of letting them hide it (world mode; the engine's own
+ *                    weapon is always drawn over the world, as in the game)
  *   NDVR_HUD_SPLIT   how much of each side moves, as a fraction of the HUD's width (default 0.21; 0 = keep it whole)
  * Run with SS2PORT_NOVSYNC=1 so the desktop window does not pace the headset. */
 #ifdef _WIN32
@@ -138,7 +145,7 @@ extern void vr_d3d_gun_replay_eye(PlatTexture *t, float ox, float oy, float kx, 
 static float eye_map[2][4]; static float gun_f_eye; static int gun_W, gun_H;
 #define VR_GUN_MAXD 32
 extern int vr_gun_dtw[VR_GUN_MAXD], vr_gun_dth[VR_GUN_MAXD], vr_gun_dtris[VR_GUN_MAXD]; extern double vr_gun_mom[10], vr_gun_rgb[4];
-static double gun_zero_m = 10; static int gun_ontop, gun_use_world = 1;
+static double gun_zero_m = 10; static int gun_ontop, gun_use_world, eng_mode = 1, gun_mirror_on = 1;   /* eng_mode: 1 engine, 2 capture, 3 world */
 static float gun_m[12]; static int gun_mirror;
 static int gun_enabled = 1, gun_ready, gun_frames, gun_ref_nv, gun_odd; static double gun_scale = 1, gun_off[3], gun_sum[3], gun_g0[3];
 
@@ -193,11 +200,16 @@ static void init_env(void) {
     snap_deg = envd("NDVR_SNAP", 30); hud_radius = envd("NDVR_HUD_DIST", 1.2); hud_angle = envd("NDVR_HUD_ANGLE", 80); hud_follow = envd("NDVR_HUD_FOLLOW", 0.1);
     gun_enabled = envi("NDVR_GUN", 1); gun_scale = envd("NDVR_GUN_SCALE", 1.0);
     gun_off[0] = envd("NDVR_GUN_X", 0); gun_off[1] = envd("NDVR_GUN_Y", 0); gun_off[2] = envd("NDVR_GUN_Z", 0);
-    gun_zero_m = envd("NDVR_ZERO", 10); gun_ontop = envi("NDVR_GUN_ONTOP", 0); gun_use_world = envi("NDVR_GUN_WORLD", 1);
+    gun_zero_m = envd("NDVR_ZERO", 10); gun_ontop = envi("NDVR_GUN_ONTOP", 0); gun_mirror_on = envi("NDVR_GUN_MIRROR", 1);
+    { const char *g = getenv("NDVR_GUN_MODE"); eng_mode = !g || !*g || *g == 'e' || *g == 'E' ? 1 : *g == 'c' || *g == 'C' ? 2 : *g == 'w' || *g == 'W' ? 3 : 1; }
+    if (!getenv("NDVR_GUN_MODE") && getenv("NDVR_GUN_WORLD")) eng_mode = envi("NDVR_GUN_WORLD", 0) ? 3 : 2;   /* the older switch */
+    gun_use_world = eng_mode == 3;
     hud_crosshair = envi("NDVR_HUD_CROSSHAIR", 0); hud_split = envd("NDVR_HUD_SPLIT", 0.21); hud_pull = envd("NDVR_HUD_PULL", 12); hud_lift = envd("NDVR_HUD_LIFT", 6);
     if (hud_split < 0.05 || hud_split > 0.45) hud_split = 0;
     if (hud_radius < 0.3) hud_radius = 0.3; if (hud_angle < 20) hud_angle = 20; if (hud_angle > 170) hud_angle = 170; if (hud_follow < 0) hud_follow = 0; if (hud_follow > 1) hud_follow = 1;
     if (mode == 2) port_debug("NDVR: NewDarkVR build %s", NDVR_BUILD);
+    if (mode == 2 && gun_enabled) port_debug("NDVR: weapon: %s, scale %.2f, offset %.0f %.0f %.0f cm%s", eng_mode == 1 ? "drawn by the engine at the hand" : eng_mode == 2 ? "captured and moved to the hand" : "floor model in the hand",
+                                             gun_scale, gun_off[0], gun_off[1], gun_off[2], !hand_dom && gun_mirror_on ? ", mirrored for the left hand" : "");
     if (mode == 2) port_debug("NDVR: %s hand, aim %s (%.0f / %.0f units per count), snap turn %.0f deg, HUD %.0f deg wide at %.2f m, follow %.2f, crosshair %s",
         hand_dom ? "right" : "left", aim_on ? "on" : "off", aim_uh, aim_uv, snap_deg, hud_angle, hud_radius, hud_follow, hud_crosshair ? "shown" : "hidden");
 }
@@ -322,7 +334,7 @@ static void gun_setup(const ndvr_pose *ep) {
     const ndvr_hand *hd = &fr.hand[hand_dom];
     float *m = gun_m; memset(m, 0, sizeof gun_m); m[0] = m[5] = m[10] = 1; gun_mirror = 0;
     if (!gun_ready || !hd->active || !(hd->aim.flags & NDVR_POSE_ORIENT_VALID) || !(hd->grip.flags & NDVR_POSE_POS_VALID)) return;
-    double D[3] = { (hand_dom ? 1.0 : -1.0) * gun_scale, gun_scale, gun_scale }, k = 1.0 / unit_m;
+    double D[3] = { (hand_dom || !gun_mirror_on ? 1.0 : -1.0) * gun_scale, gun_scale, gun_scale }, k = 1.0 / unit_m;
     V3 col[3];
     for (int i = 0; i < 3; i++) {                                 /* the gun's axes (camera convention) -> controller -> LOCAL -> eye -> camera convention */
         V3 q = v3(i == 0, i == 1, i == 2), c = v3(q.x, -q.y, -q.z), l = qrot(hd->aim.orientation, c), e = qconjrot(ep->orientation, l);
@@ -338,7 +350,7 @@ static void gun_setup(const ndvr_pose *ep) {
         for (int c2 = 0; c2 < 3; c2++) m[r * 4 + c2] = (float)(cr[c2] * D[c2]);
         m[r * 4 + 3] = (float)(h + cr[0] * u[0] + cr[1] * u[1] + cr[2] * u[2]);
     }
-    gun_mirror = !hand_dom;
+    gun_mirror = !hand_dom && gun_mirror_on;
 }
 static unsigned gun_log_n;
 static void gun_measure(void) {                                   /* after the capture: learn the weapon's rest position */
@@ -574,9 +586,139 @@ static int vw_muzzle_aim(const ndvr_hand *hd, V3 *dir) {          /* aim so a sh
     return 1;
 }
 
+/* ---------------------------------------------------------------- the weapon drawn by the engine, at the hand (default)
+ * The engine draws its first-person model (with the 25th Anniversary models from tools/convert_remaster.py: the whole
+ * weapon and the arm) in every scene render, after a depth-only clear, placed in front of that render's camera. The
+ * hook on md_set_model (0x627280) runs as the engine starts on a model; its r3 context (*0xa458b0, read from the light
+ * dumps of SS2PORT_PPL_LIGHTS) then holds
+ *   +0x04, +0x08  the focal lengths (pixels * 65536)
+ *   +0x44, +0x68  the model's world pose: rotation (rows: the model's axes in the world) and position; world = v R + p
+ *   +0x78, +0x9c  the camera: world to view, view = world M + t (x right, y down, z forward; engine units)
+ *   +0xac, +0xd0  the same with the columns scaled by the focal lengths (x, y) - what the vertices go through
+ * The camera pass (one render from the engine's own camera, nothing drawn; it comes first) records each first-person
+ * model's pose against that camera. In each eye render the camera is replaced, for those models only, by one that sends
+ * the recorded pose to the gun hand as this eye sees it:
+ *   view = K( ((world - p_e) R_e^T R_c + p_c) M_c + t_c )      (e: this render's pose of the model, c: the camera pass's)
+ * with K = gun_m (gun_setup: engine camera space to eye camera space, the rest position g0 at the controller's grip;
+ * g0 is the model's origin in the camera pass, which the game puts at the hand). The engine then transforms, lights,
+ * clips and draws the whole model in the eye itself, sub-objects (slide, recoil, reload) included. Its polygons reach
+ * Direct3D one render late; port/dx/d3d9.c puts them into the right eye (vr_d3d_spill). */
+#define R3CTX 0x00a458b0u
+extern int vr_d3d_weapon_phase(void);
+extern void vr_d3d_spill(int how, PlatTexture *t, float ox, float oy, float kx, float ky);
+extern int vr_gun_cull_flip; extern float vr_ppl_zoom, vr_ppl_wzoom;   /* port/dx/d3d9.c */
+typedef struct { uint32_t model; double R[9], p[3], M[9], t[3]; } EngPose;
+static EngPose eng_rec[4]; static int eng_nrec, eng_pass;         /* eng_pass: 0 off, 1 camera pass (record), 2 eye render (move) */
+static uint32_t eng_sv_ctx, eng_sv[26]; static int eng_sv_on;      /* the context words changed for the model being drawn */
+static double eng_sf[2];                                          /* this eye render's focal lengths (from its scene models) */
+static uint32_t eng_g0_model; static int eng_g0_n; static double eng_g0_sum[3];
+static unsigned eng_n_rec, eng_n_moved, eng_n_fallback, eng_n_unknown, eng_n_nofocal, eng_n_aim, eng_n_cam, eng_n_far;
+static double eng_last_dist;
+
+static void ctx_rd(uint32_t a, double *d, int n) { for (int i = 0; i < n; i++) d[i] = rdf(a + 4u * (uint32_t)i); }
+static void ctx_wr(uint32_t a, const double *d, int n) { for (int i = 0; i < n; i++) wrf(a + 4u * (uint32_t)i, (float)d[i]); }
+static void eng_restore(void) {
+    if (!eng_sv_on) return;
+    WR32(eng_sv_ctx + 4, eng_sv[0]); WR32(eng_sv_ctx + 8, eng_sv[1]);
+    for (uint32_t i = 0; i < 12; i++) { WR32(eng_sv_ctx + 0x78 + 4 * i, eng_sv[2 + i]); WR32(eng_sv_ctx + 0xac + 4 * i, eng_sv[14 + i]); }
+    eng_sv_on = 0;
+}
+static void eng_read(uint32_t ctx, uint32_t model, EngPose *e) {
+    e->model = model; ctx_rd(ctx + 0x44, e->R, 9); ctx_rd(ctx + 0x68, e->p, 3); ctx_rd(ctx + 0x78, e->M, 9); ctx_rd(ctx + 0x9c, e->t, 3);
+}
+static int eng_sane(const EngPose *e) {                           /* a rotation and a camera that look like ones */
+    for (int i = 0; i < 9; i++) if (!isfinite(e->R[i]) || !isfinite(e->M[i]) || fabs(e->R[i]) > 2 || fabs(e->M[i]) > 2) return 0;
+    for (int i = 0; i < 3; i++) if (!isfinite(e->p[i]) || !isfinite(e->t[i])) return 0;
+    return 1;
+}
+static void row_mul(const double *v, const double *A, double *o) { for (int j = 0; j < 3; j++) o[j] = v[0] * A[j] + v[1] * A[3 + j] + v[2] * A[6 + j]; }
+static void cam_pos(const EngPose *e, double *c) {                /* the camera's world position: -t M^T */
+    for (int i = 0; i < 3; i++) c[i] = -(e->t[0] * e->M[i * 3] + e->t[1] * e->M[i * 3 + 1] + e->t[2] * e->M[i * 3 + 2]);
+}
+int vr_model_hook(CPU *c) {
+    if (!eng_pass) return 0;
+    eng_restore();
+    uint32_t ctx = RD32(R3CTX);
+    if (!ctx || !g_valid(ctx, 0xdc)) return 0;
+    if (!vr_d3d_weapon_phase()) {                                  /* a model of the scene: remember this eye's focal lengths */
+        if (eng_pass == 2) { eng_sf[0] = rdf(ctx + 4); eng_sf[1] = rdf(ctx + 8); }
+        return 0;
+    }
+    EngPose cur; eng_read(ctx, c->eax, &cur);
+    if (!eng_sane(&cur)) return 0;
+    if (eng_pass == 1) {                                           /* the camera pass: where the model sits against the engine's camera */
+        double cc[3]; cam_pos(&cur, cc);                           /* (only a pose near the camera is the model's own) */
+        if (!((cur.p[0] - cc[0]) * (cur.p[0] - cc[0]) + (cur.p[1] - cc[1]) * (cur.p[1] - cc[1]) + (cur.p[2] - cc[2]) * (cur.p[2] - cc[2]) < 64)) { eng_n_far++; return 0; }
+        int k = 0; while (k < eng_nrec && eng_rec[k].model != cur.model) k++;
+        if (k == eng_nrec) { if (eng_nrec == 4) return 0; eng_nrec++; }
+        eng_rec[k] = cur; eng_n_rec++;
+        if (k == 0) {                                              /* the first one (the weapon): its rest position, over 30 frames */
+            double o[3]; row_mul(cur.p, cur.M, o); for (int i = 0; i < 3; i++) o[i] += cur.t[i];
+            if (cur.model != eng_g0_model) { eng_g0_model = cur.model; eng_g0_n = 0; eng_g0_sum[0] = eng_g0_sum[1] = eng_g0_sum[2] = 0; gun_ready = 0;
+                                             port_debug("NDVR GUN: a new first-person model (%08x): measuring where the game holds it", cur.model); }
+            if (eng_g0_n < 30) {
+                for (int i = 0; i < 3; i++) eng_g0_sum[i] += o[i];
+                if (++eng_g0_n == 30) {
+                    for (int i = 0; i < 3; i++) gun_g0[i] = eng_g0_sum[i] / 30; gun_ready = 1;
+                    port_debug("NDVR GUN: the game holds it %.2f m right, %.2f m down, %.2f m ahead of the eye; that point is now at your %s hand",
+                               gun_g0[0] * unit_m, gun_g0[1] * unit_m, gun_g0[2] * unit_m, hand_dom ? "right" : "left");
+                }
+            }
+        }
+        return 0;
+    }
+    int k = 0; while (k < eng_nrec && eng_rec[k].model != cur.model) k++;
+    if (k == eng_nrec || !gun_ready) { eng_n_unknown++; return 0; }   /* not seen in the camera pass: drawn where the engine puts it */
+    const EngPose *r = &eng_rec[k];
+    double sx = eng_sf[0], sy = eng_sf[1];
+    if (!(sx > 0 && sy > 0)) { sx = rdf(ctx + 4); sy = rdf(ctx + 8); eng_n_nofocal++; }
+    /* This render's pose of the model (e) is trusted when it is near this render's camera and turned either as in the
+     * camera pass (the game turns the weapon with the aim) or with the camera (R_e M_e = R_c M_c). Otherwise the context
+     * did not hold the model's pose yet: then the model is taken to be placed as in the camera pass, moved along with
+     * the camera. */
+    double ce[3], cc[3], Re[9], pe[3], e2 = 0, e3 = 0, RM[9]; cam_pos(&cur, ce); cam_pos(r, cc);
+    memcpy(Re, cur.R, sizeof Re); memcpy(pe, cur.p, sizeof pe);
+    eng_last_dist = sqrt((pe[0] - ce[0]) * (pe[0] - ce[0]) + (pe[1] - ce[1]) * (pe[1] - ce[1]) + (pe[2] - ce[2]) * (pe[2] - ce[2]));
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) {     /* R_c M_c M_e^T: turned with the camera */
+        double a = 0; for (int q = 0; q < 3; q++) { double rmq = r->R[i * 3] * r->M[q] + r->R[i * 3 + 1] * r->M[3 + q] + r->R[i * 3 + 2] * r->M[6 + q]; a += rmq * cur.M[j * 3 + q]; }
+        RM[i * 3 + j] = a;
+    }
+    for (int i = 0; i < 9; i++) { e2 += (Re[i] - r->R[i]) * (Re[i] - r->R[i]); e3 += (Re[i] - RM[i]) * (Re[i] - RM[i]); }
+    if (eng_last_dist < 8 && e2 < 0.01) eng_n_aim++;
+    else if (eng_last_dist < 8 && e3 < 0.01) eng_n_cam++;
+    else { memcpy(Re, r->R, sizeof Re); for (int i = 0; i < 3; i++) pe[i] = r->p[i] + ce[i] - cc[i]; eng_n_fallback++; }
+    double X[9], Y[9], AT[9], N[9], w[3], w2[3], c0[3];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) X[i * 3 + j] = Re[i] * r->R[j] + Re[3 + i] * r->R[3 + j] + Re[6 + i] * r->R[6 + j];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) Y[i * 3 + j] = X[i * 3] * r->M[j] + X[i * 3 + 1] * r->M[3 + j] + X[i * 3 + 2] * r->M[6 + j];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) AT[i * 3 + j] = gun_m[j * 4 + i];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) N[i * 3 + j] = Y[i * 3] * AT[j] + Y[i * 3 + 1] * AT[3 + j] + Y[i * 3 + 2] * AT[6 + j];
+    row_mul(pe, X, w); for (int i = 0; i < 3; i++) w[i] = r->p[i] - w[i];
+    row_mul(w, r->M, w2); for (int i = 0; i < 3; i++) w2[i] += r->t[i];
+    row_mul(w2, AT, c0); for (int i = 0; i < 3; i++) c0[i] += gun_m[i * 4 + 3];
+    eng_sv_ctx = ctx; eng_sv[0] = RD32(ctx + 4); eng_sv[1] = RD32(ctx + 8);
+    for (uint32_t i = 0; i < 12; i++) { eng_sv[2 + i] = RD32(ctx + 0x78 + 4 * i); eng_sv[14 + i] = RD32(ctx + 0xac + 4 * i); }
+    eng_sv_on = 1;
+    double Q[9], u[3], s3[3] = { sx, sy, 1 };
+    for (int i = 0; i < 9; i++) Q[i] = N[i] * s3[i % 3];
+    for (int j = 0; j < 3; j++) u[j] = c0[j] * s3[j];
+    wrf(ctx + 4, (float)sx); wrf(ctx + 8, (float)sy);
+    ctx_wr(ctx + 0x78, N, 9); ctx_wr(ctx + 0x9c, c0, 3); ctx_wr(ctx + 0xac, Q, 9); ctx_wr(ctx + 0xd0, u, 3);
+    eng_n_moved++;
+    return 0;
+}
+static void eng_log(void) {                                       /* about once a second: what the engine-drawn weapon is doing */
+    static unsigned n;
+    if (++n % 90) return;
+    const ndvr_hand *hd = &fr.hand[hand_dom];
+    port_debug("NDVR GUN: engine-drawn: %u models recorded in the camera pass (%u not near the camera), %u moved to the hand (pose turned with the aim %u, with the camera %u, fallback %u; last model-to-eye distance %.2f units), %u not recognised, %u without the scene's focal length; %s, hand %s",
+               eng_n_rec, eng_n_far, eng_n_moved, eng_n_aim, eng_n_cam, eng_n_fallback, eng_last_dist, eng_n_unknown, eng_n_nofocal, gun_ready ? "rest position measured" : "measuring the rest position", hd->active ? "tracked" : "NOT tracked");
+    eng_n_rec = eng_n_moved = eng_n_unknown = eng_n_fallback = eng_n_nofocal = eng_n_aim = eng_n_cam = eng_n_far = 0;
+}
+
 /* ---------------------------------------------------------------- end of a game frame (called from Present) */
 static Submit pending_sub;
 void vr_frame_present(void) {
+    vr_ppl_zoom = vr_ppl_wzoom = 0;                               /* the eye renders' zoom for per-pixel lighting: this frame only */
     if (mode < 0) init_env();
     if (mode != 2) return;
     if (xr_state == 0) glt_call(rt_init, NULL);
@@ -592,7 +734,8 @@ void vr_frame_present(void) {
         if (!(fr_ok && fr.should_render && (fr.head.flags & NDVR_POSE_ORIENT_VALID))) { plat_gfx_deferred(rt_submit, &s, sizeof s); return; }
         track_update();
     }
-    if (st == 1 && gun_enabled) {                                 /* the weapon the engine drew after the scene, into each eye at the hand */
+    if (st == 1 && gun_enabled && eng_mode == 1) eng_log();
+    if (st == 1 && gun_enabled && eng_mode != 1) {                /* the weapon the engine drew after the scene, into each eye at the hand */
         gun_measure();
         if (gun_use_world) vw_update();
         for (int e = 0; e < 2; e++) {
@@ -785,6 +928,18 @@ int vr_scene_hook(CPU *c) {
     }
     double tv = zarg > 0 ? 0.75 / zarg : 0.75, th = tv * asp;
     if (fov_h > 0) { th = tan(fov_h * PI_D / 360.0); tv = fov_v > 0 ? tan(fov_v * PI_D / 360.0) : th / asp; }
+    int eng = mode == 2 && gun_enabled && eng_mode == 1;
+    if (eng) {                                                    /* the camera pass: the engine's own camera, nothing drawn (see "the weapon drawn by the engine") */
+        *c = saved; memcpy(GP(p), keep_cam, sizeof keep_cam);
+        eng_nrec = 0; eng_pass = 1;
+        vr_d3d_gun_pass(1, 0, 0, 0);
+        nd_00601430(c);
+        vr_d3d_gun_pass(0, 0, 0, 0);
+        eng_restore(); eng_pass = 0;
+        vr_d3d_spill(1, NULL, 0, 0, 0, 0);                         /* its weapon reaches Direct3D in the next render: dropped */
+        vr_ppl_wzoom = zarg > 0 ? (float)zarg : 1.0f;             /* the weapon is drawn with the eye's projection */
+    }
+    if (mode == 2) vr_ppl_zoom = zarg > 0 ? (float)zarg : 1.0f;   /* per-pixel lighting rebuilds view positions with the eye renders' zoom */
     for (int e = 0; e < 2; e++) {
         *c = saved;
         if (mode == 1) {
@@ -824,13 +979,15 @@ int vr_scene_hook(CPU *c) {
             eye_map[e][0] = (float)((-th - L) * px); eye_map[e][1] = (float)((U - tv) * py); eye_map[e][2] = (float)(2 * th * px / W); eye_map[e][3] = (float)(2 * tv * py / H);
             sub.fov[e] = *f;
             vr_d3d_eye_begin(hmd_tex[e], tw, tht);
+            if (eng) { gun_setup(ep); vr_gun_cull_flip = gun_mirror; eng_sf[0] = eng_sf[1] = 0; eng_pass = 2; }
             nd_00601430(c);
+            if (eng) { eng_restore(); eng_pass = 0; vr_d3d_spill(2, hmd_tex[e], eye_map[e][0], eye_map[e][1], eye_map[e][2], eye_map[e][3]); }
             continue;
         }
         vr_d3d_eye_begin(eye_tex[e], W, H);
         nd_00601430(c);
     }
-    if (mode == 2 && gun_enabled) {                               /* the engine's own camera, for the weapon drawn after this (see "the held weapon") */
+    if (mode == 2 && gun_enabled && !eng) {                       /* the engine's own camera, for the weapon drawn after this (see "the held weapon") */
         *c = saved; memcpy(GP(p), keep_cam, sizeof keep_cam);
         double zc = 0.5; uint64_t zb; memcpy(&zb, &zc, 8);          /* a wide view, so less of the weapon is cut at the screen edges */
         WR32(c->esp + 4, (uint32_t)zb); WR32(c->esp + 8, (uint32_t)(zb >> 32));
@@ -846,7 +1003,7 @@ int vr_scene_hook(CPU *c) {
     memcpy(GP(CAM_COPY), keep_copy, sizeof keep_copy);             /* everything else sees the engine's own camera, */
     if (mode == 2) memcpy(GP(CAM_COPY), keep_cam, 24);            /* as the original would have left it (sound, culling, the aim below) */
     vr_d3d_restore();
-    if (mode == 2 && gun_enabled) vr_d3d_gun_pass(3, (float)(H * 0.5 / 1.5), W * 0.5f, H * 0.5f);   /* keep the weapon the engine draws next */
+    if (mode == 2 && gun_enabled && !eng) vr_d3d_gun_pass(3, (float)(H * 0.5 / 1.5), W * 0.5f, H * 0.5f);   /* keep the weapon the engine draws next */
     if (mode == 1) {
         plat_gfx_copy(eye_tex[0], 0, 0, W, H, NULL, 0, 0, W / 2, H, 1);
         plat_gfx_copy(eye_tex[1], 0, 0, W, H, NULL, W / 2, 0, W - W / 2, H, 1);
@@ -864,5 +1021,6 @@ int vr_scene_hook(CPU *c) {
 #else
 #include "core.h"
 int vr_scene_hook(CPU *c) { (void)c; return 0; }
+int vr_model_hook(CPU *c) { (void)c; return 0; }
 void vr_frame_present(void) {}
 #endif

@@ -36,7 +36,8 @@ separation) into two render textures, and shows them side by side in the window.
 ## vr-port-hooks.patch (headset build, supersedes m3a and m3b)
 
 Applied together with the NewDarkVR files by `tools/install_into_port.py <NewDarkRecompiled checkout>`; do not apply it by hand.
-Adds the forwarder in `port/core/fastpaths.c`; `vr_d3d_*`, the HUD texture capture (`vr_hud_*`) and a call to
+Adds the forwarders in `port/core/fastpaths.c` (render_scene_from_camera, and md_set_model for the weapon drawn at the hand);
+the late-weapon routing to the right eye (`vr_d3d_spill`) and the eye renders' zoom for per-pixel lighting; `vr_d3d_*`, the HUD texture capture (`vr_hud_*`) and a call to
 `vr_frame_present` at Present in `port/dx/d3d9.c`; `vr_gl_tex_fbo` / `vr_gl_bb_fbo` in `port/backends/sdl2/gl_render.c`;
 controller-as-mouse input (`vr_input_*`: relative and absolute motion, buttons, keys, capture state) in
 `port/win32/user32.c`; and the Windows link libraries in `port/CMakeLists.txt`. The sources it needs
